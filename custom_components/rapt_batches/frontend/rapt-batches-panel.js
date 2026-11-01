@@ -59,7 +59,7 @@ table{width:100%;border-collapse:collapse;min-width:640px}
 th,td{padding:10px 8px;text-align:left;border-bottom:1px solid var(--divider-color);white-space:nowrap}
 th{cursor:pointer;font-weight:500;color:var(--secondary-text-color);user-select:none}
 tr.row:hover td{background:var(--secondary-background-color)}
-.name{cursor:pointer;font-weight:500;color:var(--primary-text-color);background:none;border:none;padding:0;border-radius:0;text-align:left}
+.name{font-weight:500}
 .badge{display:inline-block;padding:2px 10px;border-radius:10px;font-size:12px;color:#fff}
 .s-active{background:#4caf7d}.s-completed{background:#e0a458}.s-archived{background:#7a7f8c}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:16px}
@@ -77,6 +77,15 @@ textarea{width:100%;min-height:80px;resize:vertical;margin-top:12px}
 .charts .card{margin:0;padding:8px;overflow:hidden}
 .u-title{color:var(--primary-text-color);font-size:14px!important}
 .u-legend{color:var(--secondary-text-color);font-size:12px}
+tr.row{cursor:pointer}
+.overlay{position:fixed;inset:0;z-index:10;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}
+.dialog{background:var(--card-background-color);color:var(--primary-text-color);border-radius:16px;padding:20px 24px;max-width:420px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.dialog h3{margin:0 0 8px;font-size:18px;font-weight:500}
+.dialog p{margin:0 0 16px;color:var(--secondary-text-color);line-height:1.4}
+.dialog input{width:100%;margin-bottom:16px}
+.dialog .btns{display:flex;justify-content:flex-end;gap:8px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:11;padding:10px 20px;border-radius:24px;background:#323232;color:#fff;box-shadow:0 4px 16px rgba(0,0,0,.4);max-width:90%}
+.toast.err{background:var(--error-color,#db4437)}
 @media(max-width:600px){.charts{grid-template-columns:1fr}.wrap{padding:12px 8px 56px}}
 `;
 
@@ -94,8 +103,16 @@ class RaptBatchesPanel extends HTMLElement {
     this._series = {};
     this._lib = null;
     this._ready = false;
+    this._modal = null;
+    this._toastMsg = null;
+    this._title = "Brewing Library";
     this.shadowRoot.addEventListener("click", (e) => this._onClick(e));
     this.shadowRoot.addEventListener("change", (e) => this._onChange(e));
+    this.shadowRoot.addEventListener("keydown", (e) => {
+      if (!this._modal) return;
+      if (e.key === "Enter") this._closeModal(true);
+      else if (e.key === "Escape") this._closeModal(false);
+    });
   }
 
   connectedCallback() {
@@ -119,7 +136,13 @@ class RaptBatchesPanel extends HTMLElement {
     this._narrow = v;
     if (changed && this._ready) this._render();
   }
-  set panel(_) {}
+  set panel(p) {
+    const title = (p && p.config && p.config.title) || "Brewing Library";
+    if (title !== this._title) {
+      this._title = title;
+      if (this._ready) this._render();
+    }
+  }
   set route(_) {}
 
   // ---- data -----------------------------------------------------------
@@ -167,6 +190,7 @@ class RaptBatchesPanel extends HTMLElement {
   }
 
   _tick() {
+    if (this._modal) return;
     if (this._view === "list") this._refresh();
     else if (this._view === "detail" && this._current()?.status === "active" && !this._editing()) {
       this._refresh().then(() => this._openDetail(this._detailId));
@@ -174,6 +198,7 @@ class RaptBatchesPanel extends HTMLElement {
   }
 
   _editing() {
+    if (this._modal) return true;
     const a = this.shadowRoot.activeElement;
     return a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA");
   }
@@ -215,7 +240,14 @@ class RaptBatchesPanel extends HTMLElement {
   async _onClick(e) {
     const t = e.target.closest("[data-act]");
     if (!t) return;
+    if (e.target.closest(".selcell")) return; // ticking a checkbox must not open the row
     const act = t.dataset.act;
+    if (act === "modal-bg") {
+      if (e.target === t) this._closeModal(false);
+      return;
+    }
+    if (act === "modal-ok") return this._closeModal(true);
+    if (act === "modal-cancel") return this._closeModal(false);
     const id = t.dataset.id || this._detailId;
     switch (act) {
       case "menu":
@@ -249,32 +281,47 @@ class RaptBatchesPanel extends HTMLElement {
         this._render();
         break;
       case "finish": {
-        const v = prompt("Final gravity (leave blank to use the latest reading)", "");
-        if (v === null) return;
-        const fg = v.trim() === "" ? null : parseFloat(v);
-        if (fg !== null && Number.isNaN(fg)) return alert("That is not a number.");
-        await this._action(id, "finish", { fg });
+        const b = this._current();
+        const r = await this._ask({
+          title: "Finish batch",
+          body: `Stop recording ${b.name}. Enter the final gravity you measured, or leave it blank to use the latest reading (${fmt(b.latest.sg)}).`,
+          input: { label: "Final gravity", type: "number", step: "0.001", placeholder: fmt(b.latest.sg) },
+          confirm: "Finish batch",
+        });
+        if (!r.ok) return;
+        const v = (r.value || "").trim();
+        const fg = v === "" ? null : parseFloat(v);
+        if (fg !== null && Number.isNaN(fg)) return this._toast("That is not a valid gravity.", "err");
+        await this._action(id, "finish", { fg }, "Batch finished");
         break;
       }
       case "reopen":
-        await this._action(id, "reopen");
+        await this._action(id, "reopen", {}, "Batch reopened. Recording has resumed.");
         break;
-      case "archive":
-        if (confirm("Archive this batch? It moves off the integration page and stays here in the panel.")) {
-          await this._action(id, "archive");
-        }
+      case "archive": {
+        const r = await this._ask({
+          title: "Archive batch",
+          body: "It moves off the integration page and stays in this library. You can unarchive it any time.",
+          confirm: "Archive",
+        });
+        if (r.ok) await this._action(id, "archive", {}, "Batch archived");
         break;
+      }
       case "unarchive":
-        await this._action(id, "unarchive");
+        await this._action(id, "unarchive", {}, "Batch moved back to Finished");
         break;
-      case "delete":
-        if (confirm("Permanently delete this batch and all its readings? This cannot be undone.")) {
-          await this._action(id, "delete");
-          this._view = "list";
-        }
+      case "delete": {
+        const r = await this._ask({
+          title: "Delete batch",
+          body: "This permanently deletes the batch and all of its readings. It cannot be undone.",
+          confirm: "Delete",
+          danger: true,
+        });
+        if (r.ok && (await this._action(id, "delete", {}, "Batch deleted"))) this._view = "list";
         break;
+      }
       case "save":
-        await this._save();
+        await this._save(t);
         break;
       case "export":
         await this._export(id);
@@ -282,16 +329,19 @@ class RaptBatchesPanel extends HTMLElement {
     }
   }
 
-  async _action(id, action, extra = {}) {
+  async _action(id, action, extra = {}, okMsg = "Done") {
     try {
       await this._ws({ type: "rapt_batches/action", batch_id: id, action, ...extra });
     } catch (e) {
-      return alert((e && e.message) || "That did not work.");
+      this._toast((e && e.message) || "That did not work.", "err");
+      return false;
     }
+    this._toast(okMsg);
     await this._retryRefresh();
+    return true;
   }
 
-  async _save() {
+  async _save(btn) {
     const q = (s) => this.shadowRoot.querySelector(s);
     const num = (el) => (el && el.value.trim() !== "" ? parseFloat(el.value) : null);
     const msg = { type: "rapt_batches/update", batch_id: this._detailId, name: q("#f-name").value.trim(), notes: q("#f-notes").value };
@@ -299,11 +349,17 @@ class RaptBatchesPanel extends HTMLElement {
     const fg = num(q("#f-fg"));
     if (og !== null) msg.og = og;
     if (fg !== null && !q("#f-fg").disabled) msg.fg = fg;
+    btn.disabled = true;
+    btn.textContent = "Saving...";
     try {
       await this._ws(msg);
     } catch (e) {
-      return alert((e && e.message) || "Could not save.");
+      this._toast((e && e.message) || "Could not save.", "err");
+      btn.disabled = false;
+      btn.textContent = "Save details";
+      return;
     }
+    this._toast("Details saved");
     await this._retryRefresh();
   }
 
@@ -315,9 +371,60 @@ class RaptBatchesPanel extends HTMLElement {
       a.download = r.filename;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      this._toast("Export downloaded");
     } catch (e) {
-      alert((e && e.message) || "Export failed.");
+      this._toast((e && e.message) || "Export failed.", "err");
     }
+  }
+
+  // ---- dialogs and toasts ----------------------------------------------
+
+  _ask(opts) {
+    return new Promise((resolve) => {
+      this._modal = { ...opts, resolve };
+      this._render();
+    });
+  }
+
+  _closeModal(ok) {
+    const m = this._modal;
+    if (!m) return;
+    const el = this.shadowRoot.getElementById("m-input");
+    const value = el ? el.value : "";
+    this._modal = null;
+    this._render();
+    m.resolve({ ok, value });
+  }
+
+  _modalHtml() {
+    const m = this._modal;
+    if (!m) return "";
+    const i = m.input;
+    return `<div class="overlay" data-act="modal-bg"><div class="dialog" role="dialog">` +
+      `<h3>${esc(m.title)}</h3><p>${esc(m.body)}</p>` +
+      (i ? `<input id="m-input" type="${i.type || "text"}" step="${i.step || ""}" placeholder="${esc(i.placeholder || "")}" aria-label="${esc(i.label || "")}">` : "") +
+      `<div class="btns"><button data-act="modal-cancel">Cancel</button>` +
+      `<button class="${m.danger ? "danger" : "primary"}" data-act="modal-ok">${esc(m.confirm || "OK")}</button></div></div></div>`;
+  }
+
+  _toast(msg, kind = "ok") {
+    this._toastMsg = { msg, kind };
+    this._showToast();
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => {
+      this._toastMsg = null;
+      this._showToast();
+    }, 3000);
+  }
+
+  _showToast() {
+    const old = this.shadowRoot.querySelector(".toast");
+    if (old) old.remove();
+    if (!this._toastMsg) return;
+    const d = document.createElement("div");
+    d.className = "toast" + (this._toastMsg.kind === "err" ? " err" : "");
+    d.textContent = this._toastMsg.msg;
+    this.shadowRoot.appendChild(d);
   }
 
   // ---- rendering ------------------------------------------------------
@@ -348,10 +455,15 @@ class RaptBatchesPanel extends HTMLElement {
     this.shadowRoot.innerHTML =
       `<style>${STYLE}${this._lib ? this._lib.css : ""}</style>` +
       `<div class="bar">${this._narrow ? '<button class="icon" data-act="menu" title="Menu">&#9776;</button>' : ""}` +
-      `<h1>Brewing</h1>` +
+      `<h1>${esc(this._title)}</h1>` +
       (showBack ? '<button data-act="back">&larr; Batches</button>' : '<button data-act="new">New batch</button>') +
-      `</div><div class="wrap">${this._error ? `<div class="err">${esc(this._error)}</div>` : ""}${body}</div>`;
+      `</div><div class="wrap">${this._error ? `<div class="err">${esc(this._error)}</div>` : ""}${body}</div>${this._modalHtml()}`;
     this.scrollTop = top;
+    this._showToast();
+    if (this._modal) {
+      const inp = this.shadowRoot.getElementById("m-input");
+      if (inp) inp.focus();
+    }
     if (this._view === "detail" && this._current()) this._drawDetail();
     else if (this._view === "compare") this._drawCompare();
   }
@@ -377,8 +489,8 @@ class RaptBatchesPanel extends HTMLElement {
         rows
           .map((b) => {
             const g = gravityOf(b);
-            return `<tr class="row"><td><input type="checkbox" class="sel" data-id="${esc(b.id)}" ${this._selected.has(b.id) ? "checked" : ""}></td>` +
-              `<td><button class="name" data-act="open" data-id="${esc(b.id)}">${esc(b.name)}</button></td>` +
+            return `<tr class="row" data-act="open" data-id="${esc(b.id)}"><td class="selcell"><input type="checkbox" class="sel" data-id="${esc(b.id)}" ${this._selected.has(b.id) ? "checked" : ""}></td>` +
+              `<td><span class="name">${esc(b.name)}</span></td>` +
               `<td><span class="badge s-${b.status}">${LABEL[b.status] || b.status}</span></td>` +
               `<td>${fmtDate(b.start_ts)}</td><td>${fmt(daysOf(b), 1)}</td><td>${fmt(b.og)}</td><td>${fmt(g)}</td>` +
               `<td>${fmt(abv(b.og, g), 1)}${abv(b.og, g) == null ? "" : "%"}</td></tr>`;

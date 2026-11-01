@@ -1,0 +1,15 @@
+stop_batch:
+  fields:
+    batch_name:
+      required: true
+      example: "Pale Ale 4"
+      selector:
+        text:
+    final_gravity:
+      required: false
+      selector:
+        number:
+          min: 1.0
+          max: 1.2
+          step: 0.001
+          mode: box

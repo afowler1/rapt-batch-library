@@ -1,0 +1,83 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "RAPT Batches",
+        "description": "This tracks fermentation batches and keeps their data outside the Home Assistant recorder. After setup, use 'Start new batch' on the integration page."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "RAPT Batches is already set up."
+    }
+  },
+  "config_subentries": {
+    "batch": {
+      "initiate_flow": {
+        "user": "Start new batch",
+        "reconfigure": "Edit or finish batch"
+      },
+      "entry_type": "Batch",
+      "step": {
+        "user": {
+          "title": "New batch",
+          "description": "Name the batch and choose the RAPT Pill that is in the fermenter.",
+          "data": {
+            "name": "Batch name",
+            "device_id": "Pill"
+          }
+        },
+        "entities": {
+          "title": "Pill sensors",
+          "description": "Sensors were detected from the Pill. Correct them if needed. Only gravity is required.",
+          "data": {
+            "sg_entity": "Specific gravity",
+            "temp_entity": "Temperature",
+            "battery_entity": "Battery",
+            "velocity_entity": "Gravity velocity"
+          }
+        },
+        "details": {
+          "title": "Original gravity and start",
+          "description": "Set the original gravity and when fermentation started. A start time in the past is backfilled from Home Assistant history, as far back as the recorder still has it.",
+          "data": {
+            "og": "Original gravity",
+            "start": "Start time"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit batch",
+          "description": "Change the batch details. Tick 'Finish batch' to stop recording and lock in the final gravity; leave final gravity empty to use the latest reading.",
+          "data": {
+            "name": "Batch name",
+            "og": "Original gravity",
+            "fg": "Final gravity",
+            "finish": "Finish batch (stop recording)"
+          }
+        }
+      },
+      "error": {
+        "name_exists": "A batch with this name already exists.",
+        "invalid_start": "That start time could not be read."
+      },
+      "abort": {
+        "reconfigure_successful": "Batch updated."
+      }
+    }
+  },
+  "services": {
+    "stop_batch": {
+      "name": "Stop batch",
+      "description": "Finish an active batch and stop recording.",
+      "fields": {
+        "batch_name": {
+          "name": "Batch name",
+          "description": "Name of the active batch to finish."
+        },
+        "final_gravity": {
+          "name": "Final gravity",
+          "description": "Final gravity. Leave empty to use the latest reading."
+        }
+      }
+    }
+  }
+}

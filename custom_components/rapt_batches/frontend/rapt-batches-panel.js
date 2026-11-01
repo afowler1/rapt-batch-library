@@ -78,6 +78,12 @@ textarea{width:100%;min-height:80px;resize:vertical;margin-top:12px}
 .u-title{color:var(--primary-text-color);font-size:14px!important}
 .u-legend{color:var(--secondary-text-color);font-size:12px}
 tr.row{cursor:pointer}
+.src{display:block;width:100%;text-align:left;margin:0 0 8px;border-radius:12px;padding:10px 14px}
+.src span{color:var(--secondary-text-color);font-size:12px}
+.dialog label{margin-bottom:12px}
+.dialog label input{margin-bottom:0}
+.errtext{color:var(--error-color,#db4437);margin:0 0 12px}
+.dialog input[type=file]{padding:10px}
 .overlay{position:fixed;inset:0;z-index:10;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}
 .dialog{background:var(--card-background-color);color:var(--primary-text-color);border-radius:16px;padding:20px 24px;max-width:420px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.4)}
 .dialog h3{margin:0 0 8px;font-size:18px;font-weight:500}
@@ -104,10 +110,15 @@ class RaptBatchesPanel extends HTMLElement {
     this._lib = null;
     this._ready = false;
     this._modal = null;
+    this._imp = null;
     this._toastMsg = null;
     this._title = "Brewing Library";
     this.shadowRoot.addEventListener("click", (e) => this._onClick(e));
     this.shadowRoot.addEventListener("change", (e) => this._onChange(e));
+    this.shadowRoot.addEventListener("input", (e) => {
+      const t = e.target;
+      if (this._imp && t.dataset && t.dataset.imp) this._imp[t.dataset.imp] = t.value;
+    });
     this.shadowRoot.addEventListener("keydown", (e) => {
       if (!this._modal) return;
       if (e.key === "Enter") this._closeModal(true);
@@ -190,7 +201,7 @@ class RaptBatchesPanel extends HTMLElement {
   }
 
   _tick() {
-    if (this._modal) return;
+    if (this._modal || this._imp) return;
     if (this._view === "list") this._refresh();
     else if (this._view === "detail" && this._current()?.status === "active" && !this._editing()) {
       this._refresh().then(() => this._openDetail(this._detailId));
@@ -198,7 +209,7 @@ class RaptBatchesPanel extends HTMLElement {
   }
 
   _editing() {
-    if (this._modal) return true;
+    if (this._modal || this._imp) return true;
     const a = this.shadowRoot.activeElement;
     return a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA");
   }
@@ -228,6 +239,10 @@ class RaptBatchesPanel extends HTMLElement {
 
   _onChange(e) {
     const t = e.target;
+    if (t.id === "imp-file") {
+      this._impFile(t.files && t.files[0]);
+      return;
+    }
     if (t.classList && t.classList.contains("sel")) {
       if (t.checked) this._selected.add(t.dataset.id);
       else this._selected.delete(t.dataset.id);
@@ -248,6 +263,31 @@ class RaptBatchesPanel extends HTMLElement {
     }
     if (act === "modal-ok") return this._closeModal(true);
     if (act === "modal-cancel") return this._closeModal(false);
+    if (act === "imp-bg") {
+      if (e.target === t) {
+        this._imp = null;
+        this._render();
+      }
+      return;
+    }
+    if (act === "imp-cancel") {
+      this._imp = null;
+      this._render();
+      return;
+    }
+    if (act === "imp-back") {
+      this._imp.step = this._imp.step === 3 ? 2 : 1;
+      this._imp.error = null;
+      this._render();
+      return;
+    }
+    if (act === "imp-source") {
+      const src = this._imp.sources.find((x) => x.id === t.dataset.id);
+      Object.assign(this._imp, { step: 2, source: src, error: null, busy: false });
+      this._render();
+      return;
+    }
+    if (act === "imp-go") return this._impGo();
     const id = t.dataset.id || this._detailId;
     switch (act) {
       case "menu":
@@ -326,6 +366,9 @@ class RaptBatchesPanel extends HTMLElement {
       case "export":
         await this._export(id);
         break;
+      case "import":
+        await this._impOpen();
+        break;
     }
   }
 
@@ -375,6 +418,90 @@ class RaptBatchesPanel extends HTMLElement {
     } catch (e) {
       this._toast((e && e.message) || "Export failed.", "err");
     }
+  }
+
+  // ---- import ------------------------------------------------------------
+
+  async _impOpen() {
+    try {
+      const r = await this._ws({ type: "rapt_batches/import_sources" });
+      this._imp = { step: 1, sources: r.sources, error: null };
+    } catch (e) {
+      return this._toast((e && e.message) || "Could not start the import.", "err");
+    }
+    this._render();
+  }
+
+  async _impFile(file) {
+    const m = this._imp;
+    if (!m || !file) return;
+    m.busy = true;
+    m.error = null;
+    this._render();
+    try {
+      const text = await file.text();
+      const p = await this._ws({ type: "rapt_batches/import_preview", source: m.source.id, text });
+      Object.assign(m, { text, preview: p, name: file.name.replace(/\.[^.]+$/, ""), og: p.first_sg, fg: p.last_sg, step: 3 });
+    } catch (e) {
+      m.error = (e && e.message) || "Could not read that file.";
+    }
+    m.busy = false;
+    this._render();
+  }
+
+  async _impGo() {
+    const m = this._imp;
+    const name = String(m.name ?? "").trim();
+    const og = parseFloat(m.og);
+    const fg = m.fg === "" || m.fg == null ? null : parseFloat(m.fg);
+    const fail = (msg) => {
+      m.error = msg;
+      this._render();
+    };
+    if (!name) return fail("Give the batch a name.");
+    if (Number.isNaN(og)) return fail("Enter the original gravity.");
+    if (fg !== null && Number.isNaN(fg)) return fail("Final gravity is not a number.");
+    m.busy = true;
+    m.error = null;
+    this._render();
+    try {
+      const r = await this._ws({ type: "rapt_batches/import", source: m.source.id, text: m.text, name, og, fg });
+      this._imp = null;
+      this._toast("Batch imported. It is in the Archived list.");
+      await this._refresh();
+      await this._openDetail(r.id);
+    } catch (e) {
+      m.busy = false;
+      fail((e && e.message) || "Import failed.");
+    }
+  }
+
+  _importHtml() {
+    const m = this._imp;
+    if (!m) return "";
+    const err = m.error ? `<p class="errtext">${esc(m.error)}</p>` : "";
+    let inner;
+    if (m.step === 1) {
+      inner = `<h3>Import a batch</h3><p>Where is the data from?</p>` +
+        m.sources.map((x) => `<button class="src" data-act="imp-source" data-id="${esc(x.id)}"><b>${esc(x.label)}</b><br><span>${esc(x.description)}</span></button>`).join("") +
+        err + `<div class="btns"><button data-act="imp-cancel">Cancel</button></div>`;
+    } else if (m.step === 2) {
+      inner = `<h3>${esc(m.source.label)}</h3><p>${esc(m.source.help)}</p>` +
+        `<input type="file" id="imp-file" accept="${esc(m.source.accept)}" ${m.busy ? "disabled" : ""}>` +
+        (m.busy ? `<p>Reading file...</p>` : "") + err +
+        `<div class="btns"><button data-act="imp-back">Back</button><button data-act="imp-cancel">Cancel</button></div>`;
+    } else {
+      const p = m.preview;
+      inner = `<h3>Import ${esc(m.source.label)}</h3>` +
+        `<p>${p.readings} readings from ${fmtDate(p.start_ts)} to ${fmtDate(p.end_ts)}${p.skipped ? `. ${p.skipped} unreadable rows were skipped` : ""}.</p>` +
+        `<label>Batch name<input data-imp="name" value="${esc(m.name)}"></label>` +
+        `<label>Original gravity<input data-imp="og" type="number" step="0.001" value="${esc(m.og)}"></label>` +
+        `<label>Final gravity<input data-imp="fg" type="number" step="0.001" value="${esc(m.fg)}"></label>` +
+        `<p style="font-size:12px">OG and FG are filled from the first and last readings. Change them if you measured different values.</p>` +
+        err + `<div class="btns"><button data-act="imp-back" ${m.busy ? "disabled" : ""}>Back</button>` +
+        `<button class="primary" data-act="imp-go" ${m.busy ? "disabled" : ""}>${m.busy ? "Importing..." : "Import"}</button></div>`;
+    }
+    return `<div class="overlay" data-act="imp-bg"><div class="dialog" role="dialog">${inner}</div></div>`;
   }
 
   // ---- dialogs and toasts ----------------------------------------------
@@ -457,7 +584,7 @@ class RaptBatchesPanel extends HTMLElement {
       `<div class="bar">${this._narrow ? '<button class="icon" data-act="menu" title="Menu">&#9776;</button>' : ""}` +
       `<h1>${esc(this._title)}</h1>` +
       (showBack ? '<button data-act="back">&larr; Batches</button>' : '<button data-act="new">New batch</button>') +
-      `</div><div class="wrap">${this._error ? `<div class="err">${esc(this._error)}</div>` : ""}${body}</div>${this._modalHtml()}`;
+      `</div><div class="wrap">${this._error ? `<div class="err">${esc(this._error)}</div>` : ""}${body}</div>${this._modalHtml()}${this._importHtml()}`;
     this.scrollTop = top;
     this._showToast();
     if (this._modal) {
@@ -499,7 +626,7 @@ class RaptBatchesPanel extends HTMLElement {
         "</tbody></table></div>"
       : `<div class="empty">No batches here yet. Use <b>New batch</b> to start one.</div>`;
     return `<div class="chips">${chip("all", "All")}${chip("active", "Active")}${chip("completed", "Finished")}${chip("archived", "Archived")}<span class="grow"></span>` +
-      (n ? `<button data-act="clear">Clear</button>` : "") +
+      (n ? `<button data-act="clear">Clear</button>` : "") + `<button data-act="import">Import</button>` +
       `<button class="primary" data-act="compare" ${n < 2 ? "disabled" : ""}>Compare${n ? ` (${n})` : ""}</button></div>` +
       `<div class="card">${table}</div>`;
   }
@@ -511,7 +638,7 @@ class RaptBatchesPanel extends HTMLElement {
     const s = (label, val) => `<div class="stat"><b>${val}</b><span>${label}</span></div>`;
     const btns = {
       active: `<button class="primary" data-act="finish">Finish batch</button>`,
-      completed: `<button data-act="reopen">Reopen</button><button class="primary" data-act="archive">Archive</button>`,
+      completed: `${b.can_record === false ? "" : '<button data-act="reopen">Reopen</button>'}<button class="primary" data-act="archive">Archive</button>`,
       archived: `<button class="primary" data-act="unarchive">Unarchive</button><button class="danger" data-act="delete">Delete</button>`,
     }[b.status];
     return `<div class="chips"><h2 style="margin:0">${esc(b.name)}</h2><span class="badge s-${b.status}">${LABEL[b.status]}</span></div>` +

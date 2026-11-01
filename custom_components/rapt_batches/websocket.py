@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
+from . import importers
 from .const import DOMAIN
 from .manager import BatchManager
 
@@ -126,6 +127,60 @@ async def ws_update(hass, connection, msg) -> None:
     await _with_manager(hass, connection, msg, _call)
 
 
+@websocket_api.websocket_command({vol.Required("type"): "rapt_batches/import_sources"})
+@websocket_api.async_response
+async def ws_import_sources(hass, connection, msg) -> None:
+    connection.send_result(msg["id"], {"sources": importers.source_list()})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/import_preview",
+        vol.Required("source"): str,
+        vol.Required("text"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_import_preview(hass, connection, msg) -> None:
+    try:
+        result = await hass.async_add_executor_job(importers.parse, msg["source"], msg["text"])
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "failed", str(err))
+        return
+    connection.send_result(msg["id"], result.summary())
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/import",
+        vol.Required("source"): str,
+        vol.Required("text"): str,
+        vol.Required("name"): vol.All(str, vol.Length(min=1)),
+        vol.Optional("og"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("fg"): vol.Any(None, vol.Coerce(float)),
+    }
+)
+@websocket_api.async_response
+async def ws_import(hass, connection, msg) -> None:
+    async def _call(m: BatchManager) -> Any:
+        bid = await m.async_import(
+            msg["source"], msg["text"], msg["name"].strip(), msg.get("og"), msg.get("fg")
+        )
+        return {"id": bid}
+
+    await _with_manager(hass, connection, msg, _call)
+
+
 def async_register(hass: HomeAssistant) -> None:
-    for handler in (ws_list, ws_readings, ws_export, ws_action, ws_update):
+    for handler in (
+        ws_list,
+        ws_readings,
+        ws_export,
+        ws_action,
+        ws_update,
+        ws_import_sources,
+        ws_import_preview,
+        ws_import,
+    ):
         websocket_api.async_register_command(hass, handler)

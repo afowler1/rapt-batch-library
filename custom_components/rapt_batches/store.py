@@ -98,9 +98,13 @@ class BatchStore:
     async def async_list_batches(self) -> list[dict[str, Any]]:
         def _q() -> list[dict[str, Any]]:
             cur = self._conn.execute(
-                "SELECT id, name, start_ts, end_ts, og, fg, status, notes FROM batches"
+                "SELECT id, name, start_ts, end_ts, og, fg, status, notes, config FROM batches"
             )
             batches = _dicts(cur)
+            for b in batches:
+                cfg = json.loads(b.pop("config") or "{}")
+                b["can_record"] = bool(cfg.get("sg_entity"))  # imported batches have no sensor
+                b["imported_from"] = cfg.get("imported_from")
             latest: dict[str, dict[str, float]] = {}
             for bid, key, val in self._conn.execute(
                 """

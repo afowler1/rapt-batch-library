@@ -16,6 +16,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util import dt as dt_util
+from homeassistant.util.ulid import ulid_now
 
 from .const import (
     CONF_END,
@@ -31,6 +32,7 @@ from .const import (
     entity_key,
     signal,
 )
+from .importers import parse as parse_import
 from .store import BatchStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -181,6 +183,8 @@ class BatchManager:
 
     async def async_reopen(self, sid: str) -> None:
         sub = self._sub(sid, STATUS_COMPLETED)
+        if not sub.data.get(entity_key("sg")):
+            raise HomeAssistantError("This batch was imported, so there is no sensor to record from.")
         new = {**sub.data, CONF_STATUS: STATUS_ACTIVE, CONF_END: None, CONF_FG: None}
         self.hass.config_entries.async_update_subentry(self.entry, sub, data=new)
 
@@ -283,3 +287,31 @@ class BatchManager:
             )
         safe = re.sub(r"[^A-Za-z0-9_-]+", "_", row["name"]).strip("_") or "batch"
         return {"filename": f"{safe}.csv", "csv": out.getvalue()}
+
+    # ---- import ------------------------------------------------------
+
+    async def async_import(
+        self, source: str, text: str, name: str, og: float | None, fg: float | None
+    ) -> str:
+        """Create an archived batch from another tool's export."""
+        result = await self.hass.async_add_executor_job(parse_import, source, text)
+        existing = await self.store.async_list_batches()
+        if any(abs(b["start_ts"] - result.start_ts) < 1 for b in existing):
+            raise HomeAssistantError("A batch that starts at the same time already exists.")
+        og = og if og is not None else result.first_sg
+        fg = fg if fg is not None else result.last_sg
+        bid = ulid_now()
+        config = {
+            CONF_NAME: name,
+            CONF_OG: og,
+            CONF_FG: fg,
+            CONF_START: dt_util.utc_from_timestamp(result.start_ts).isoformat(),
+            CONF_END: dt_util.utc_from_timestamp(result.end_ts).isoformat(),
+            CONF_STATUS: STATUS_COMPLETED,
+            "imported_from": source,
+        }
+        await self.store.async_upsert_batch(
+            bid, name, result.start_ts, result.end_ts, og, fg, STATUS_ARCHIVED, config
+        )
+        await self.store.async_add_readings(bid, result.rows)
+        return bid

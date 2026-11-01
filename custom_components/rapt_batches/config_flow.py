@@ -234,7 +234,12 @@ class BatchSubentryFlow(ConfigSubentryFlow):
 
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
         status = self._batch().data[CONF_STATUS]
-        options = ["edit", "finish"] if status == STATUS_ACTIVE else ["edit", "reopen", "archive"]
+        if status == STATUS_ACTIVE:
+            options = ["edit", "finish"]
+        else:
+            options = ["edit", "archive"]
+            if self._batch().data.get(entity_key("sg")):  # imported batches have no sensor
+                options.insert(1, "reopen")
         return self.async_show_menu(step_id="reconfigure", menu_options=options)
 
     async def async_step_edit(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:

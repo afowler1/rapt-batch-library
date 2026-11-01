@@ -1,7 +1,7 @@
 {
   "domain": "rapt_batches",
-  "name": "RAPT Batches",
-  "version": "0.2.0",
+  "name": "RAPT Batch Library",
+  "version": "0.3.0",
   "documentation": "https://github.com/afowler1/rapt-batch-library",
   "issue_tracker": "https://github.com/afowler1/rapt-batch-library/issues",
   "codeowners": [],

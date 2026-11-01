@@ -139,4 +139,5 @@ class BatchStatusSensor(BatchSensor):
 
     @property
     def native_value(self) -> str:
-        return self._data[CONF_STATUS]
+        status = self._data[CONF_STATUS]
+        return "finished" if status == "completed" else status

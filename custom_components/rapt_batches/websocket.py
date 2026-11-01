@@ -1,0 +1,131 @@
+"""Websocket API used by the Brewing panel."""
+from __future__ import annotations
+
+from typing import Any, Callable, Awaitable
+
+import voluptuous as vol
+
+from homeassistant.components import websocket_api
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+
+from .const import DOMAIN
+from .manager import BatchManager
+
+ACTIONS = ("finish", "reopen", "archive", "unarchive", "delete")
+
+
+def _manager(hass: HomeAssistant) -> BatchManager | None:
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if entry.state is ConfigEntryState.LOADED:
+            return entry.runtime_data
+    return None
+
+
+async def _with_manager(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+    call: Callable[[BatchManager], Awaitable[Any]],
+) -> None:
+    manager = _manager(hass)
+    if manager is None:
+        connection.send_error(msg["id"], "not_loaded", "RAPT Batches is not loaded")
+        return
+    try:
+        result = await call(manager)
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "failed", str(err))
+        return
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "rapt_batches/list"})
+@websocket_api.async_response
+async def ws_list(hass, connection, msg) -> None:
+    async def _call(m: BatchManager) -> Any:
+        return {"batches": await m.async_list()}
+
+    await _with_manager(hass, connection, msg, _call)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/readings",
+        vol.Required("batch_id"): str,
+        vol.Optional("max_points", default=1500): vol.All(int, vol.Range(min=50, max=10000)),
+    }
+)
+@websocket_api.async_response
+async def ws_readings(hass, connection, msg) -> None:
+    await _with_manager(
+        hass, connection, msg, lambda m: m.async_readings(msg["batch_id"], msg["max_points"])
+    )
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "rapt_batches/export", vol.Required("batch_id"): str}
+)
+@websocket_api.async_response
+async def ws_export(hass, connection, msg) -> None:
+    await _with_manager(hass, connection, msg, lambda m: m.async_export(msg["batch_id"]))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/action",
+        vol.Required("batch_id"): str,
+        vol.Required("action"): vol.In(ACTIONS),
+        vol.Optional("fg"): vol.Any(None, vol.Coerce(float)),
+    }
+)
+@websocket_api.async_response
+async def ws_action(hass, connection, msg) -> None:
+    async def _call(m: BatchManager) -> Any:
+        bid, action = msg["batch_id"], msg["action"]
+        if action == "finish":
+            await m.async_finish(bid, msg.get("fg"))
+        elif action == "reopen":
+            await m.async_reopen(bid)
+        elif action == "archive":
+            await m.async_archive(bid)
+        elif action == "unarchive":
+            await m.async_unarchive(bid)
+        elif action == "delete":
+            await m.async_delete(bid)
+        return {"ok": True}
+
+    await _with_manager(hass, connection, msg, _call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/update",
+        vol.Required("batch_id"): str,
+        vol.Optional("name"): str,
+        vol.Optional("notes"): str,
+        vol.Optional("og"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("fg"): vol.Any(None, vol.Coerce(float)),
+    }
+)
+@websocket_api.async_response
+async def ws_update(hass, connection, msg) -> None:
+    async def _call(m: BatchManager) -> Any:
+        await m.async_update_batch(
+            msg["batch_id"],
+            name=msg.get("name"),
+            notes=msg.get("notes"),
+            og=msg.get("og"),
+            fg=msg.get("fg"),
+        )
+        return {"ok": True}
+
+    await _with_manager(hass, connection, msg, _call)
+
+
+def async_register(hass: HomeAssistant) -> None:
+    for handler in (ws_list, ws_readings, ws_export, ws_action, ws_update):
+        websocket_api.async_register_command(hass, handler)

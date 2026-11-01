@@ -441,7 +441,7 @@ class RaptBatchesPanel extends HTMLElement {
     try {
       const text = await file.text();
       const p = await this._ws({ type: "rapt_batches/import_preview", source: m.source.id, text });
-      Object.assign(m, { text, preview: p, name: file.name.replace(/\.[^.]+$/, ""), og: p.first_sg, fg: p.last_sg, step: 3 });
+      Object.assign(m, { text, preview: p, name: file.name.replace(/\.[^.]+$/, ""), og: p.og_guess, fg: p.fg_guess, step: 3 });
     } catch (e) {
       m.error = (e && e.message) || "Could not read that file.";
     }
@@ -493,11 +493,13 @@ class RaptBatchesPanel extends HTMLElement {
     } else {
       const p = m.preview;
       inner = `<h3>Import ${esc(m.source.label)}</h3>` +
-        `<p>${p.readings} readings from ${fmtDate(p.start_ts)} to ${fmtDate(p.end_ts)}${p.skipped ? `. ${p.skipped} unreadable rows were skipped` : ""}.</p>` +
+        `<p>${p.readings} readings from ${fmtDate(p.start_ts)} to ${fmtDate(p.end_ts)}.</p>` +
+        (p.dropped + p.trimmed ? `<p style="font-size:13px">${p.dropped + p.trimmed} readings were left out because they look wrong. This is usually the Pill being out of the fermenter at the end of a batch.</p>` : "") +
+        (p.skipped ? `<p style="font-size:13px">${p.skipped} rows could not be read and were skipped.</p>` : "") +
         `<label>Batch name<input data-imp="name" value="${esc(m.name)}"></label>` +
         `<label>Original gravity<input data-imp="og" type="number" step="0.001" value="${esc(m.og)}"></label>` +
         `<label>Final gravity<input data-imp="fg" type="number" step="0.001" value="${esc(m.fg)}"></label>` +
-        `<p style="font-size:12px">OG and FG are filled from the first and last readings. Change them if you measured different values.</p>` +
+        `<p style="font-size:12px">Suggested OG is the highest reading in the first day and FG the median of the last 12 hours. Change them if you measured different values.</p>` +
         err + `<div class="btns"><button data-act="imp-back" ${m.busy ? "disabled" : ""}>Back</button>` +
         `<button class="primary" data-act="imp-go" ${m.busy ? "disabled" : ""}>${m.busy ? "Importing..." : "Import"}</button></div>`;
     }

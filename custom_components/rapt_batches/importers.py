@@ -7,6 +7,7 @@ import wizard lists whatever is registered here.
 from __future__ import annotations
 
 import re
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -16,16 +17,25 @@ from homeassistant.exceptions import HomeAssistantError
 _FRACTION = re.compile(r"(\.\d{6})\d+")  # the portal writes 7 fractional digits
 
 
+# A gravity outside this range is not a fermenting beer: it is the Pill sitting
+# in air or in someone's hand (readings like 1.26 or 2.96 appear at the end of a batch).
+SG_MIN, SG_MAX = 0.980, 1.200
+# After that, a reading that jumps this far from the previous ones at the very end is dropped too.
+TAIL_WINDOW, TAIL_JUMP = 10, 0.010
+
+
 @dataclass
 class ImportResult:
     """Readings parsed from a file, as (key, unix_ts, value) rows."""
 
     rows: list[tuple[str, float, float]]
-    skipped: int
+    skipped: int  # rows that could not be read
+    dropped: int  # rows left out because the gravity was implausible
+    trimmed: int  # rows left out at the end because they jumped away from the batch
     start_ts: float
     end_ts: float
-    first_sg: float
-    last_sg: float
+    og_guess: float  # highest gravity in the first day
+    fg_guess: float  # median gravity over the last 12 hours
 
     def summary(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
@@ -35,10 +45,12 @@ class ImportResult:
             "readings": counts.get("sg", 0),
             "counts": counts,
             "skipped": self.skipped,
+            "dropped": self.dropped,
+            "trimmed": self.trimmed,
             "start_ts": self.start_ts,
             "end_ts": self.end_ts,
-            "first_sg": self.first_sg,
-            "last_sg": self.last_sg,
+            "og_guess": self.og_guess,
+            "fg_guess": self.fg_guess,
         }
 
 
@@ -62,7 +74,8 @@ _LEGACY_COLUMNS = {
 
 def parse_legacy_rapt(text: str) -> ImportResult:
     """Legacy RAPT Portal export: Date, Temperature, Gravity, Gravity Velocity,
-    Signal Strength, Battery (tab separated; signal strength is not stored)."""
+    Signal Strength, Battery (tab, comma or semicolon separated; signal strength
+    is not stored)."""
     lines = [ln for ln in text.lstrip("\ufeff").splitlines() if ln.strip()]
     if len(lines) < 2:
         raise HomeAssistantError("The file has no data rows.")
@@ -76,10 +89,12 @@ def parse_legacy_rapt(text: str) -> ImportResult:
     date_idx = headers.index("date")
     cols = {headers.index(name): key for name, key in _LEGACY_COLUMNS.items() if name in headers}
 
-    rows: list[tuple[str, float, float]] = []
+    records: list[tuple[float, dict[str, float]]] = []
     skipped = 0
     for line in lines[1:]:
         cells = line.split(delim)
+        if not any(c.strip() for c in cells):
+            continue  # a blank row (exports end with one) is not an error
         ts = _parse_time(cells[date_idx]) if date_idx < len(cells) else None
         values: dict[str, float] = {}
         for idx, key in cols.items():
@@ -93,28 +108,50 @@ def parse_legacy_rapt(text: str) -> ImportResult:
         if ts is None or "sg" not in values:
             skipped += 1
             continue
-        rows.extend((key, ts, number) for key, number in values.items())
-
-    sgs = [v for key, _ts, v in rows if key == "sg"]
-    if not sgs:
+        records.append((ts, values))
+    if not records:
         raise HomeAssistantError("No valid gravity readings were found in the file.")
-    low, high = min(sgs), max(sgs)
-    if 900 <= low and high <= 1300:  # gravity written in points, e.g. 1041
-        rows = [(k, ts, v / 1000 if k == "sg" else v) for k, ts, v in rows]
-    elif low < 0.95 or high > 1.3:
+
+    # Units: judge by the typical reading, so a few bad ones cannot reject the file.
+    gravities = sorted(v["sg"] for _ts, v in records)
+    median = gravities[len(gravities) // 2]
+    if 900 <= median <= 1300:  # gravity written in points, e.g. 1041
+        for _ts, v in records:
+            v["sg"] /= 1000
+    elif not 0.95 <= median <= 1.3:
         raise HomeAssistantError(
             "Gravity values do not look like specific gravity (for example 1.050). Plato and Brix exports are not supported yet."
         )
-    sg_rows = [(ts, v) for key, ts, v in rows if key == "sg"]
-    first = min(sg_rows)
-    last = max(sg_rows)
+
+    records.sort(key=lambda r: r[0])
+    before = len(records)
+    records = [r for r in records if SG_MIN <= r[1]["sg"] <= SG_MAX]
+    dropped = before - len(records)
+
+    trimmed = 0
+    while len(records) > TAIL_WINDOW + 1:
+        ref = statistics.median(r[1]["sg"] for r in records[-TAIL_WINDOW - 1 : -1])
+        if abs(records[-1][1]["sg"] - ref) > TAIL_JUMP:
+            records.pop()
+            trimmed += 1
+        else:
+            break
+    if not records:
+        raise HomeAssistantError("Every gravity reading in the file looks implausible.")
+
+    first_ts, last_ts = records[0][0], records[-1][0]
+    og_guess = max(v["sg"] for ts, v in records if ts <= first_ts + 86400)
+    fg_guess = statistics.median(v["sg"] for ts, v in records if ts >= last_ts - 43200)
+    rows = [(key, ts, number) for ts, v in records for key, number in v.items()]
     return ImportResult(
         rows=rows,
         skipped=skipped,
-        start_ts=min(ts for _k, ts, _v in rows),
-        end_ts=max(ts for _k, ts, _v in rows),
-        first_sg=first[1],
-        last_sg=last[1],
+        dropped=dropped,
+        trimmed=trimmed,
+        start_ts=first_ts,
+        end_ts=last_ts,
+        og_guess=round(og_guess, 4),
+        fg_guess=round(fg_guess, 4),
     )
 
 

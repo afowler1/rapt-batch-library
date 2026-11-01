@@ -298,8 +298,8 @@ class BatchManager:
         existing = await self.store.async_list_batches()
         if any(abs(b["start_ts"] - result.start_ts) < 1 for b in existing):
             raise HomeAssistantError("A batch that starts at the same time already exists.")
-        og = og if og is not None else result.first_sg
-        fg = fg if fg is not None else result.last_sg
+        og = og if og is not None else result.og_guess
+        fg = fg if fg is not None else result.fg_guess
         bid = ulid_now()
         config = {
             CONF_NAME: name,

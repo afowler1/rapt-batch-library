@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 DOMAIN = "rapt_batches"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 DB_NAME = "rapt_batches.db"
 PLATFORMS = ["sensor"]
 
 PANEL_URL = "rapt-batches"
+CONF_PANEL_TITLE = "panel_title"
+CONF_PANEL_ICON = "panel_icon"
+DEFAULT_PANEL_TITLE = "Brewing Library"
+DEFAULT_PANEL_ICON = "mdi:beer-outline"
 STATIC_URL = "/rapt_batches_static"
 
 # Measurement keys recorded for each batch
@@ -22,7 +26,6 @@ CONF_STATUS = "status"
 CONF_FINISH = "finish"
 CONF_REOPEN = "reopen"
 CONF_ARCHIVE = "archive"
-CONF_RESET = "reset_to_current"
 
 # Stored values. "completed" is shown as "Finished" in the UI.
 STATUS_ACTIVE = "active"

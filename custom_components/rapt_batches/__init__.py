@@ -12,8 +12,12 @@ from homeassistant.helpers.typing import ConfigType
 
 from . import websocket
 from .const import (
+    CONF_PANEL_ICON,
+    CONF_PANEL_TITLE,
     CONF_STATUS,
     DB_NAME,
+    DEFAULT_PANEL_ICON,
+    DEFAULT_PANEL_TITLE,
     DOMAIN,
     PANEL_URL,
     PLATFORMS,
@@ -52,25 +56,33 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
-async def _async_register_panel(hass: HomeAssistant) -> None:
+async def _async_register_panel(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    settings = {**entry.data, **entry.options}
+    title = settings.get(CONF_PANEL_TITLE) or DEFAULT_PANEL_TITLE
+    icon = settings.get(CONF_PANEL_ICON) or DEFAULT_PANEL_ICON
     flags = hass.data.setdefault(DOMAIN, {})
     if not flags.get("static"):
         await hass.http.async_register_static_paths(
             [StaticPathConfig(STATIC_URL, str(Path(__file__).parent / "frontend"), False)]
         )
         flags["static"] = True
+    if flags.get("panel") and flags.get("panel_cfg") != (title, icon):
+        frontend.async_remove_panel(hass, PANEL_URL)  # title or icon changed
+        flags["panel"] = False
     if not flags.get("panel"):
         await panel_custom.async_register_panel(
             hass,
             frontend_url_path=PANEL_URL,
             webcomponent_name="rapt-batches-panel",
-            sidebar_title="Brewing",
-            sidebar_icon="mdi:beer-outline",
+            sidebar_title=title,
+            sidebar_icon=icon,
             module_url=f"{STATIC_URL}/rapt-batches-panel.js?v={VERSION}",
             embed_iframe=False,
             require_admin=False,
+            config={"title": title},
         )
         flags["panel"] = True
+        flags["panel_cfg"] = (title, icon)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -80,7 +92,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.runtime_data = manager
     await manager.async_start()
 
-    await _async_register_panel(hass)
+    await _async_register_panel(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True

@@ -2,8 +2,12 @@
   "config": {
     "step": {
       "user": {
-        "title": "RAPT Batches",
-        "description": "This tracks fermentation batches and keeps their data outside the Home Assistant recorder. After setup, use 'Start new batch' on the integration page."
+        "title": "RAPT Batch Library",
+        "description": "Tracks fermentation batches and keeps their data outside the Home Assistant recorder. Choose how the sidebar panel appears; you can change this later under Configure. After setup, use 'Start new batch' on the integration page.",
+        "data": {
+          "panel_title": "Sidebar title",
+          "panel_icon": "Sidebar icon"
+        }
       }
     },
     "abort": {
@@ -14,7 +18,7 @@
     "batch": {
       "initiate_flow": {
         "user": "Start new batch",
-        "reconfigure": "Edit or finish batch"
+        "reconfigure": "Manage batch"
       },
       "entry_type": "Batch",
       "step": {
@@ -37,36 +41,71 @@
           }
         },
         "details": {
-          "title": "Original gravity and start",
-          "description": "The prefilled values are for right now (the Pill's current gravity and the current time). If this batch is already underway, overwrite them with the real OG and start time; older history is backfilled from Home Assistant where it still exists. Overwrote them by mistake? Tick 'Reset to current values' and submit to restore them.",
-          "data": {
-            "og": "Original gravity",
-            "start": "Start time",
-            "reset_to_current": "Reset to current values"
+          "title": "How is this batch starting?",
+          "description": "Pick one. 'Starting now' prefills the Pill's current gravity and the current time. 'Already underway' lets you enter the real OG and start time.",
+          "menu_options": {
+            "details_now": "Starting now",
+            "details_past": "Already underway"
           }
         },
         "reconfigure": {
-          "title": "Edit batch",
-          "description": "Active batch: tick Finish to stop recording. Finished batch: tick Reopen to resume recording, or Archive to move it off this page into the Brewing panel (archiving ignores other edits in this form). Leave final gravity empty to use the latest reading.",
+          "title": "Manage batch",
+          "description": "What would you like to do?",
+          "menu_options": {
+            "edit": "Edit details",
+            "finish": "Finish batch",
+            "reopen": "Reopen batch",
+            "archive": "Archive batch"
+          }
+        },
+        "details_now": {
+          "title": "Starting now",
+          "description": "Prefilled with the Pill's current gravity and the current time. Adjust them if needed.",
+          "data": {
+            "og": "Original gravity",
+            "start": "Start time"
+          }
+        },
+        "details_past": {
+          "title": "Already underway",
+          "description": "Enter the original gravity and when fermentation started. History is backfilled from Home Assistant as far back as it still exists.",
+          "data": {
+            "og": "Original gravity",
+            "start": "Start time"
+          }
+        },
+        "edit": {
+          "title": "Edit details",
           "data": {
             "name": "Batch name",
             "og": "Original gravity",
-            "fg": "Final gravity",
-            "finish": "Finish batch (stop recording)",
-            "reopen": "Reopen batch (resume recording)",
-            "archive": "Archive batch (move to the Brewing panel)"
+            "fg": "Final gravity"
           }
+        },
+        "finish": {
+          "title": "Finish batch",
+          "description": "Recording stops and the ABV is locked in. Leave final gravity empty to use the latest reading.",
+          "data": {
+            "fg": "Final gravity (optional)"
+          }
+        },
+        "reopen": {
+          "title": "Reopen batch",
+          "description": "Recording resumes, and readings since the batch finished are filled in from Home Assistant history. Select Submit to continue."
+        },
+        "archive": {
+          "title": "Archive batch",
+          "description": "The batch leaves this page but stays in the library panel, where you can unarchive it. Select Submit to continue."
         }
       },
       "error": {
         "name_exists": "A batch with this name already exists.",
-        "invalid_start": "That start time could not be read.",
-        "choose_one": "Choose either Reopen or Archive, not both.",
-        "archive_failed": "Only finished batches can be archived."
+        "invalid_start": "That start time could not be read."
       },
       "abort": {
         "reconfigure_successful": "Batch updated.",
-        "archived": "Batch archived. Find it in the Brewing panel in the sidebar."
+        "archived": "Batch archived. Find it in the library panel in the sidebar.",
+        "archive_failed": "Only finished batches can be archived."
       }
     }
   },
@@ -82,6 +121,17 @@
         "final_gravity": {
           "name": "Final gravity",
           "description": "Final gravity. Leave empty to use the latest reading."
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Sidebar panel",
+        "data": {
+          "panel_title": "Sidebar title",
+          "panel_icon": "Sidebar icon"
         }
       }
     }

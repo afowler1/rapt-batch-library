@@ -10,6 +10,7 @@ from homeassistant.config_entries import (
     ConfigFlow,
     ConfigFlowResult,
     ConfigSubentryFlow,
+    OptionsFlow,
     SubentryFlowResult,
 )
 from homeassistant.core import callback
@@ -18,17 +19,17 @@ from homeassistant.helpers import entity_registry as er, selector
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    CONF_ARCHIVE,
     CONF_DEVICE,
     CONF_END,
     CONF_FG,
-    CONF_FINISH,
     CONF_NAME,
     CONF_OG,
-    CONF_REOPEN,
-    CONF_RESET,
+    CONF_PANEL_ICON,
+    CONF_PANEL_TITLE,
     CONF_START,
     CONF_STATUS,
+    DEFAULT_PANEL_ICON,
+    DEFAULT_PANEL_TITLE,
     DOMAIN,
     STATUS_ACTIVE,
     STATUS_COMPLETED,
@@ -86,6 +87,15 @@ def _float_state(hass, entity_id: str | None) -> float | None:
         return None
 
 
+def _panel_schema(title: str, icon: str) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(CONF_PANEL_TITLE, default=title): selector.TextSelector(),
+            vol.Required(CONF_PANEL_ICON, default=icon): selector.IconSelector(),
+        }
+    )
+
+
 class RaptBatchesConfigFlow(ConfigFlow, domain=DOMAIN):
     """Create the single hub entry."""
 
@@ -93,8 +103,15 @@ class RaptBatchesConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(title="RAPT Batches", data={})
-        return self.async_show_form(step_id="user")
+            return self.async_create_entry(title="RAPT Batch Library", data=user_input)
+        return self.async_show_form(
+            step_id="user", data_schema=_panel_schema(DEFAULT_PANEL_TITLE, DEFAULT_PANEL_ICON)
+        )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        return RaptBatchesOptionsFlow()
 
     @classmethod
     @callback
@@ -104,11 +121,29 @@ class RaptBatchesConfigFlow(ConfigFlow, domain=DOMAIN):
         return {"batch": BatchSubentryFlow}
 
 
+class RaptBatchesOptionsFlow(OptionsFlow):
+    """Rename the sidebar panel or change its icon."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+        cur = {**self.config_entry.data, **self.config_entry.options}
+        return self.async_show_form(
+            step_id="init",
+            data_schema=_panel_schema(
+                cur.get(CONF_PANEL_TITLE) or DEFAULT_PANEL_TITLE,
+                cur.get(CONF_PANEL_ICON) or DEFAULT_PANEL_ICON,
+            ),
+        )
+
+
 class BatchSubentryFlow(ConfigSubentryFlow):
-    """Wizard: name and pill, then sensors, then OG and start time."""
+    """Wizard: name and pill, sensors, then how the batch starts."""
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
+
+    # ---- new batch ---------------------------------------------------
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
         errors: dict[str, str] = {}
@@ -152,88 +187,105 @@ class BatchSubentryFlow(ConfigSubentryFlow):
         )
         return self.async_show_form(step_id="entities", data_schema=schema)
 
-    def _details_schema(self, og: float | None, start: str) -> vol.Schema:
-        return vol.Schema(
-            {
-                vol.Required(CONF_OG, description={"suggested_value": og}): GRAVITY,
-                vol.Required(CONF_START, description={"suggested_value": start}): selector.DateTimeSelector(),
-                vol.Optional(CONF_RESET, default=False): selector.BooleanSelector(),
-            }
-        )
-
     async def async_step_details(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """A real choice (two buttons) instead of a form that may hold stale values."""
+        return self.async_show_menu(step_id="details", menu_options=["details_now", "details_past"])
+
+    async def async_step_details_now(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        og = _float_state(self.hass, self._data.get(entity_key("sg")))
+        return await self._details("details_now", user_input, og, _now_minute())
+
+    async def async_step_details_past(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        return await self._details("details_past", user_input, None, None)
+
+    async def _details(
+        self, step_id: str, user_input: dict[str, Any] | None, og: float | None, start: str | None
+    ) -> SubentryFlowResult:
         errors: dict[str, str] = {}
-        current_og = _float_state(self.hass, self._data.get(entity_key("sg")))
         if user_input is not None:
-            if user_input.get(CONF_RESET):
-                # Put back the values for right now and show the form again.
-                return self.async_show_form(
-                    step_id="details",
-                    data_schema=self._details_schema(current_og, _now_minute()),
-                )
             try:
-                start = _to_utc_iso(user_input[CONF_START])
+                start_iso = _to_utc_iso(user_input[CONF_START])
             except ValueError:
                 errors[CONF_START] = "invalid_start"
             else:
                 data = {
                     **self._data,
                     CONF_OG: user_input[CONF_OG],
-                    CONF_START: start,
+                    CONF_START: start_iso,
                     CONF_STATUS: STATUS_ACTIVE,
                     CONF_END: None,
                     CONF_FG: None,
                 }
                 return self.async_create_entry(title=self._data[CONF_NAME], data=data)
-        return self.async_show_form(
-            step_id="details",
-            data_schema=self._details_schema(current_og, _now_minute()),
-            errors=errors,
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_OG, description={"suggested_value": og}): GRAVITY,
+                vol.Required(
+                    CONF_START, description={"suggested_value": start}
+                ): selector.DateTimeSelector(),
+            }
         )
+        return self.async_show_form(step_id=step_id, data_schema=schema, errors=errors)
+
+    # ---- manage an existing batch ------------------------------------
+
+    def _batch(self):
+        return self._get_reconfigure_subentry()
 
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
-        """Edit a batch; finish it, reopen it, or archive it."""
-        subentry = self._get_reconfigure_subentry()
-        data = subentry.data
-        status = data[CONF_STATUS]
-        errors: dict[str, str] = {}
+        status = self._batch().data[CONF_STATUS]
+        options = ["edit", "finish"] if status == STATUS_ACTIVE else ["edit", "reopen", "archive"]
+        return self.async_show_menu(step_id="reconfigure", menu_options=options)
+
+    async def async_step_edit(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        sub = self._batch()
+        data = sub.data
         if user_input is not None:
-            if user_input.get(CONF_ARCHIVE) and user_input.get(CONF_REOPEN):
-                errors["base"] = "choose_one"
-            elif user_input.get(CONF_ARCHIVE):
-                # Archiving only moves the batch; other edits in this form are ignored.
-                try:
-                    await self._get_entry().runtime_data.async_archive(subentry.subentry_id)
-                except HomeAssistantError:
-                    errors["base"] = "archive_failed"
-                else:
-                    return self.async_abort(reason="archived")
-            else:
-                new = {**data, CONF_OG: user_input[CONF_OG]}
-                if user_input.get(CONF_FG) is not None:
-                    new[CONF_FG] = user_input[CONF_FG]
-                if status == STATUS_ACTIVE and user_input.get(CONF_FINISH):
-                    new[CONF_STATUS] = STATUS_COMPLETED
-                    new[CONF_END] = dt_util.utcnow().isoformat()
-                    if new.get(CONF_FG) is None:
-                        new[CONF_FG] = _float_state(self.hass, data.get(entity_key("sg")))
-                elif status == STATUS_COMPLETED and user_input.get(CONF_REOPEN):
-                    new[CONF_STATUS] = STATUS_ACTIVE
-                    new[CONF_END] = None
-                    new[CONF_FG] = None
-                return self.async_update_and_abort(
-                    self._get_entry(), subentry, title=user_input[CONF_NAME], data=new
-                )
+            new = {**data, CONF_NAME: user_input[CONF_NAME], CONF_OG: user_input[CONF_OG]}
+            if user_input.get(CONF_FG) is not None:
+                new[CONF_FG] = user_input[CONF_FG]
+            return self.async_update_and_abort(
+                self._get_entry(), sub, title=user_input[CONF_NAME], data=new
+            )
         fields: dict[Any, Any] = {
-            vol.Required(CONF_NAME, default=subentry.title): selector.TextSelector(),
+            vol.Required(CONF_NAME, default=sub.title): selector.TextSelector(),
             vol.Required(CONF_OG, default=data[CONF_OG]): GRAVITY,
-            vol.Optional(CONF_FG, description={"suggested_value": data.get(CONF_FG)}): GRAVITY,
         }
-        if status == STATUS_ACTIVE:
-            fields[vol.Required(CONF_FINISH, default=False)] = selector.BooleanSelector()
-        else:
-            fields[vol.Required(CONF_REOPEN, default=False)] = selector.BooleanSelector()
-            fields[vol.Required(CONF_ARCHIVE, default=False)] = selector.BooleanSelector()
+        if data[CONF_STATUS] != STATUS_ACTIVE:
+            fields[vol.Optional(CONF_FG, description={"suggested_value": data.get(CONF_FG)})] = GRAVITY
+        return self.async_show_form(step_id="edit", data_schema=vol.Schema(fields))
+
+    async def async_step_finish(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        sub = self._batch()
+        data = sub.data
+        if user_input is not None:
+            fg = user_input.get(CONF_FG)
+            if fg is None:
+                fg = _float_state(self.hass, data.get(entity_key("sg")))
+            new = {
+                **data,
+                CONF_STATUS: STATUS_COMPLETED,
+                CONF_END: dt_util.utcnow().isoformat(),
+                CONF_FG: fg,
+            }
+            return self.async_update_and_abort(self._get_entry(), sub, data=new)
         return self.async_show_form(
-            step_id="reconfigure", data_schema=vol.Schema(fields), errors=errors
+            step_id="finish", data_schema=vol.Schema({vol.Optional(CONF_FG): GRAVITY})
         )
+
+    async def async_step_reopen(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        sub = self._batch()
+        if user_input is not None:
+            new = {**sub.data, CONF_STATUS: STATUS_ACTIVE, CONF_END: None, CONF_FG: None}
+            return self.async_update_and_abort(self._get_entry(), sub, data=new)
+        return self.async_show_form(step_id="reopen")
+
+    async def async_step_archive(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        sub = self._batch()
+        if user_input is not None:
+            try:
+                await self._get_entry().runtime_data.async_archive(sub.subentry_id)
+            except HomeAssistantError:
+                return self.async_abort(reason="archive_failed")
+            return self.async_abort(reason="archived")
+        return self.async_show_form(step_id="archive")

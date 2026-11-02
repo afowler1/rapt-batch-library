@@ -8,6 +8,7 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
 from . import websocket
@@ -26,6 +27,7 @@ from .const import (
     VERSION,
 )
 from .manager import BatchManager
+from .resources import async_register_cards, async_remove_cards
 from .store import BatchStore
 
 
@@ -96,6 +98,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await manager.async_start()
 
     await _async_register_panel(hass, entry)
+    # The mobile app ignores add_extra_js_url, so also register the cards as a dashboard resource.
+    async_at_started(hass, async_register_cards)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
@@ -112,6 +116,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove the sidebar panel when the integration itself is removed."""
+    await async_remove_cards(hass)
     flags = hass.data.get(DOMAIN, {})
     if flags.get("panel"):
         frontend.async_remove_panel(hass, PANEL_URL)

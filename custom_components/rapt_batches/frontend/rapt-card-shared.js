@@ -105,3 +105,57 @@ export function drawChart(lib, host, title, data, series, opts = {}) {
     host
   );
 }
+
+// ---- shared by the list, compare and stats cards ---------------------------
+
+export const PALETTE = ["#f2b544", "#4fc3f7", "#4caf7d", "#e0763f", "#b57edc", "#ef5350"];
+export const fmtDate = (ts) =>
+  ts ? new Date(ts * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "--";
+export const batchOptions = (batches) => batches.map((b) => ({ value: b.id, label: `${b.name} (${LABEL[b.status]})` }));
+
+export function registerCard(type, name, description) {
+  window.customCards = window.customCards || [];
+  window.customCards.push({ type, name, description });
+}
+
+// A visual editor made of one ha-form. schemaFor(batches) returns the form schema.
+export function defineEditor(tag, labels, schemaFor) {
+  customElements.define(
+    tag,
+    class extends HTMLElement {
+      setConfig(config) {
+        this._config = config;
+        this._render();
+      }
+      set hass(hass) {
+        const first = !this._hass;
+        this._hass = hass;
+        if (first) this._fetch();
+      }
+      async _fetch() {
+        try {
+          const r = await this._hass.callWS({ type: "rapt_batches/list" });
+          this._batches = r.batches.sort((a, b) => b.start_ts - a.start_ts);
+        } catch (e) {
+          this._batches = [];
+        }
+        this._render();
+      }
+      _render() {
+        if (!this._hass || !this._config) return;
+        if (!this._form) {
+          this._form = document.createElement("ha-form");
+          this._form.addEventListener("value-changed", (e) => {
+            this._config = e.detail.value;
+            this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: this._config }, bubbles: true, composed: true }));
+          });
+          this.appendChild(this._form);
+        }
+        this._form.hass = this._hass;
+        this._form.data = this._config;
+        this._form.computeLabel = (s) => labels[s.name] || s.name;
+        this._form.schema = schemaFor(this._batches || []);
+      }
+    }
+  );
+}

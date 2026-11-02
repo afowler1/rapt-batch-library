@@ -25,7 +25,7 @@ class RaptBatchCard extends HTMLElement {
 
   setConfig(config) {
     this._config = { batch: "active", compact: false, charts: ["sg", "abv", "temp"], ...config };
-    this._load();
+    this._load(true);
   }
   getCardSize() {
     return this._config && this._config.compact ? 3 : 6;
@@ -63,10 +63,10 @@ class RaptBatchCard extends HTMLElement {
     });
   }
 
-  async _load() {
+  async _load(force = false) {
     if (!this._hass || !this._config) return;
     if (this._loading) {
-      this._again = true; // a config or hass change arrived mid-load: run once more after
+      if (force) this._again = true; // the config changed mid-load: run once more after
       return;
     }
     this._loading = true;

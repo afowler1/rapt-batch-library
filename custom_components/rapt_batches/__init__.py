@@ -66,6 +66,9 @@ async def _async_register_panel(hass: HomeAssistant, entry: ConfigEntry) -> None
             [StaticPathConfig(STATIC_URL, str(Path(__file__).parent / "frontend"), False)]
         )
         flags["static"] = True
+    if not flags.get("cards"):
+        frontend.add_extra_js_url(hass, f"{STATIC_URL}/rapt-cards.js?v={VERSION}")
+        flags["cards"] = True
     if flags.get("panel") and flags.get("panel_cfg") != (title, icon):
         frontend.async_remove_panel(hass, PANEL_URL)  # title or icon changed
         flags["panel"] = False
@@ -113,6 +116,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if flags.get("panel"):
         frontend.async_remove_panel(hass, PANEL_URL)
         flags["panel"] = False
+    if flags.get("cards"):
+        frontend.remove_extra_js_url(hass, f"{STATIC_URL}/rapt-cards.js?v={VERSION}")
+        flags["cards"] = False
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

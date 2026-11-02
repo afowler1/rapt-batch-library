@@ -105,6 +105,7 @@ class BatchStore:
                 cfg = json.loads(b.pop("config") or "{}")
                 b["can_record"] = bool(cfg.get("sg_entity"))  # imported batches have no sensor
                 b["imported_from"] = cfg.get("imported_from")
+                b["entities"] = {k: cfg.get(f"{k}_entity") for k in ("sg", "temp", "battery", "velocity")}
             latest: dict[str, dict[str, float]] = {}
             for bid, key, val in self._conn.execute(
                 """

@@ -9,6 +9,11 @@ const PALETTE = ["#f2b544", "#4fc3f7", "#4caf7d", "#e0763f", "#b57edc", "#ef5350
 const COLORS = { sg: "#f2b544", og: "#e0763f", abv: "#4caf7d", temp: "#4fc3f7", battery: "#9e9e9e", velocity: "#b57edc" };
 const LABEL = { active: "Active", completed: "Finished", archived: "Archived" };
 
+const pad2 = (n) => String(n).padStart(2, "0");
+const toLocalInput = (ts) => {
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (v, d = 3) => (v == null || Number.isNaN(v) ? "--" : Number(v).toFixed(d));
@@ -80,6 +85,8 @@ textarea{width:100%;min-height:80px;resize:vertical;margin-top:12px}
 .u-title{color:var(--primary-text-color);font-size:14px!important}
 .u-legend{color:var(--secondary-text-color);font-size:12px}
 tr.row{cursor:pointer}
+.adjust .hint{color:var(--secondary-text-color);font-size:13px;margin:0 0 12px}
+.adjust label.check{flex-direction:row;align-items:center;gap:8px;margin:0 0 12px;font-size:14px;color:var(--primary-text-color)}
 .src{display:block;width:100%;text-align:left;margin:0 0 8px;border-radius:12px;padding:10px 14px}
 .src span{color:var(--secondary-text-color);font-size:12px}
 .dialog label{margin-bottom:12px}
@@ -117,6 +124,8 @@ class RaptBatchesPanel extends HTMLElement {
       this._layout = "combined";
     }
     this._mcState = null;
+    this._adj = null;
+    this._skipState = false;
     this._modal = null;
     this._imp = null;
     this._toastMsg = null;
@@ -209,7 +218,7 @@ class RaptBatchesPanel extends HTMLElement {
   }
 
   _tick() {
-    if (this._modal || this._imp) return;
+    if (this._modal || this._imp || this._adj) return;
     if (this._view === "list") this._refresh();
     else if (this._view === "detail" && this._current()?.status === "active" && !this._editing()) {
       this._refresh().then(() => this._openDetail(this._detailId));
@@ -217,7 +226,7 @@ class RaptBatchesPanel extends HTMLElement {
   }
 
   _editing() {
-    if (this._modal || this._imp) return true;
+    if (this._modal || this._imp || this._adj) return true;
     const a = this.shadowRoot.activeElement;
     return a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA");
   }
@@ -247,6 +256,15 @@ class RaptBatchesPanel extends HTMLElement {
 
   _onChange(e) {
     const t = e.target;
+    if (this._adj && (t.id === "adj-start" || t.id === "adj-end")) {
+      const v = new Date(t.value).getTime() / 1000;
+      if (!Number.isNaN(v)) this._adjApply({ [t.id === "adj-start" ? "start" : "end"]: v });
+      return;
+    }
+    if (this._adj && t.id === "adj-recalc") {
+      this._adj.recalc = t.checked;
+      return;
+    }
     if (t.id === "imp-file") {
       this._impFile(t.files && t.files[0]);
       return;
@@ -377,6 +395,30 @@ class RaptBatchesPanel extends HTMLElement {
       case "import":
         await this._impOpen();
         break;
+      case "adjust":
+        await this._adjOpen();
+        break;
+      case "adj-set-start":
+      case "adj-set-end":
+      case "adj-keep": {
+        const sel = this._adj && this._adj.sel;
+        if (!sel) break;
+        const lo = Math.round(sel.min);
+        const hi = Math.round(sel.max);
+        this._adjApply(act === "adj-set-start" ? { start: lo } : act === "adj-set-end" ? { end: hi } : { start: lo, end: hi });
+        break;
+      }
+      case "adj-zoom":
+        if (this._adj && this._adj.sel && this._mc) this._mc.zoomTo(this._adj.sel);
+        break;
+      case "adj-save":
+        await this._adjSave();
+        break;
+      case "adj-cancel":
+        this._adj = null;
+        this._skipState = true;
+        this._render();
+        break;
       case "layout":
         this._layout = t.dataset.v;
         try {
@@ -435,6 +477,127 @@ class RaptBatchesPanel extends HTMLElement {
     } catch (e) {
       this._toast((e && e.message) || "Export failed.", "err");
     }
+  }
+
+  // ---- adjust window ------------------------------------------------------
+
+  async _adjOpen() {
+    const b = this._current();
+    if (!b) return;
+    try {
+      const r = await this._ws({ type: "rapt_batches/readings", batch_id: b.id, max_points: 1500, include_hidden: true });
+      this._adj = { start: b.start_ts, end: b.end_ts, origStart: b.start_ts, origEnd: b.end_ts, series: r.series, sel: null, recalc: false, preview: null, busy: false };
+    } catch (e) {
+      return this._toast((e && e.message) || "Could not load the readings.", "err");
+    }
+    this._skipState = true;
+    this._render();
+    this._adjPreview();
+  }
+
+  _adjustHtml(b) {
+    const a = this._adj;
+    const sb = (act, label) => `<button data-act="${act}" class="adj-sel" disabled>${label}</button>`;
+    return `<div class="card adjust"><h3>Adjust window</h3>` +
+      `<p class="hint">Drag across the chart to select a range, then use the buttons, or type the times. Greyed areas are hidden, not deleted.</p>` +
+      `<div class="form"><label>Start<input id="adj-start" type="datetime-local" value="${toLocalInput(a.start)}"></label>` +
+      `<label>End<input id="adj-end" type="datetime-local" value="${toLocalInput(a.end)}"></label></div>` +
+      `<div class="actions" style="margin:12px 0">${sb("adj-set-start", "Start at selection")}${sb("adj-set-end", "End at selection")}${sb("adj-keep", "Keep selection")}${sb("adj-zoom", "Zoom to selection")}</div>` +
+      `<p class="hint" id="adj-info">Checking...</p>` +
+      `<label class="check"><input type="checkbox" id="adj-recalc" ${a.recalc ? "checked" : ""}> Recalculate OG and FG from this window</label>` +
+      `<div class="actions"><button class="primary" id="adj-save" data-act="adj-save">Save window</button><button data-act="adj-cancel">Cancel</button></div></div>`;
+  }
+
+  _adjSelect(range) {
+    if (!this._adj) return;
+    this._adj.sel = range;
+    this.shadowRoot.querySelectorAll(".adj-sel").forEach((el) => (el.disabled = !range));
+  }
+
+  _adjApply(patch) {
+    const a = this._adj;
+    if (!a) return;
+    Object.assign(a, patch);
+    const q = (id) => this.shadowRoot.getElementById(id);
+    if (q("adj-start")) q("adj-start").value = toLocalInput(a.start);
+    if (q("adj-end")) q("adj-end").value = toLocalInput(a.end);
+    if (a.start < a.end && this._mc) this._mc.setWindow({ start: a.start, end: a.end });
+    if (this._mc) this._mc.clearSelection();
+    this._adjPreview();
+  }
+
+  _adjPreview() {
+    clearTimeout(this._adjTimer);
+    this._adjTimer = setTimeout(async () => {
+      const a = this._adj;
+      if (!a) return;
+      a.preview = null;
+      if (a.start < a.end) {
+        try {
+          a.preview = await this._ws({ type: "rapt_batches/window_preview", batch_id: this._detailId, start: a.start, end: a.end });
+        } catch (e) {
+          a.preview = null;
+        }
+      }
+      this._adjInfo();
+    }, 250);
+  }
+
+  _adjInfo() {
+    const a = this._adj;
+    const info = this.shadowRoot.getElementById("adj-info");
+    const save = this.shadowRoot.getElementById("adj-save");
+    if (!a || !info) return;
+    const p = a.preview;
+    const b = this._current();
+    let text;
+    let ok = true;
+    if (a.start >= a.end) {
+      text = "The start must be before the end.";
+      ok = false;
+    } else if (!p) {
+      text = "Checking...";
+    } else if (p.readings < 2) {
+      text = `Only ${p.readings} gravity reading${p.readings === 1 ? "" : "s"} in this window. It needs at least two unless history can be added.`;
+    } else {
+      text = `${p.readings} gravity readings in this window` + (p.og_guess != null ? `. Suggested OG ${p.og_guess.toFixed(4)}, FG ${p.fg_guess.toFixed(4)}.` : ".");
+    }
+    if (a.start < a.origStart - 1 || a.end > a.origEnd + 1) {
+      text += b && b.can_record === false
+        ? " This batch was imported, so it cannot grow past its data."
+        : " Going past the original times asks Home Assistant's history for the extra readings, where it still has them.";
+    }
+    info.textContent = text;
+    if (save) save.disabled = !ok || a.busy;
+  }
+
+  async _adjSave() {
+    const a = this._adj;
+    if (!a || a.start >= a.end) return;
+    const btn = this.shadowRoot.getElementById("adj-save");
+    a.busy = true;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Saving...";
+    }
+    try {
+      const r = await this._ws({ type: "rapt_batches/set_window", batch_id: this._detailId, start: a.start, end: a.end, recalc: a.recalc });
+      const extended = a.start < a.origStart - 1 || a.end > a.origEnd + 1;
+      let msg = "Window saved";
+      if (r.added) msg += `. ${r.added} readings added from history`;
+      else if (extended && r.can_record) msg += ". Home Assistant had no history for the extra time";
+      this._toast(msg);
+    } catch (e) {
+      a.busy = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Save window";
+      }
+      return this._toast((e && e.message) || "Could not save the window.", "err");
+    }
+    this._adj = null;
+    this._skipState = true;
+    await this._retryRefresh();
   }
 
   // ---- import ------------------------------------------------------------
@@ -661,8 +824,8 @@ class RaptBatchesPanel extends HTMLElement {
     const s = (label, val) => `<div class="stat"><b>${val}</b><span>${label}</span></div>`;
     const btns = {
       active: `<button class="primary" data-act="finish">Finish batch</button>`,
-      completed: `${b.can_record === false ? "" : '<button data-act="reopen">Reopen</button>'}<button class="primary" data-act="archive">Archive</button>`,
-      archived: `<button class="primary" data-act="unarchive">Unarchive</button><button class="danger" data-act="delete">Delete</button>`,
+      completed: `${b.can_record === false ? "" : '<button data-act="reopen">Reopen</button>'}<button class="primary" data-act="archive">Archive</button><button data-act="adjust">Adjust window</button>`,
+      archived: `<button class="primary" data-act="unarchive">Unarchive</button><button data-act="adjust">Adjust window</button><button class="danger" data-act="delete">Delete</button>`,
     }[b.status];
     return `<div class="chips"><h2 style="margin:0">${esc(b.name)}</h2><span class="badge s-${b.status}">${LABEL[b.status]}</span></div>` +
       `<div class="stats">${s("Original gravity", fmt(b.og))}${s(b.status === "active" ? "Gravity now" : "Final gravity", fmt(g))}` +
@@ -670,15 +833,18 @@ class RaptBatchesPanel extends HTMLElement {
       `${s("Days", fmt(daysOf(b), 1))}${s("Started", fmtDate(b.start_ts))}${s("Temperature", b.latest.temp == null ? "--" : fmt(b.latest.temp, 1) + "°")}` +
       `${s("Battery", b.latest.battery == null ? "--" : fmt(b.latest.battery, 0) + "%")}</div>` +
       `<div class="actions">${btns}<button data-act="export">Export CSV</button></div>` +
+      (this._adj ? this._adjustHtml(b) : "") +
       `<div class="card"><h3>Details</h3><div class="form">` +
       `<label>Name<input id="f-name" value="${esc(b.name)}"></label>` +
       `<label>Original gravity<input id="f-og" type="number" step="0.001" value="${b.og ?? ""}"></label>` +
       `<label>Final gravity<input id="f-fg" type="number" step="0.001" value="${b.fg ?? ""}" ${b.status === "active" ? "disabled" : ""}></label></div>` +
       `<textarea id="f-notes" placeholder="Notes: recipe, yeast, tasting...">${esc(b.notes || "")}</textarea>` +
       `<div class="actions" style="margin:12px 0 0"><button class="primary" data-act="save">Save details</button></div></div>` +
-      `<div class="chips"><button class="chip ${this._layout === "combined" ? "on" : ""}" data-act="layout" data-v="combined">Combined chart</button>` +
-      `<button class="chip ${this._layout === "combined" ? "" : "on"}" data-act="layout" data-v="separate">Separate charts</button></div>` +
-      (this._layout === "combined"
+      (this._adj
+        ? ""
+        : `<div class="chips"><button class="chip ${this._layout === "combined" ? "on" : ""}" data-act="layout" data-v="combined">Combined chart</button>` +
+          `<button class="chip ${this._layout === "combined" ? "" : "on"}" data-act="layout" data-v="separate">Separate charts</button></div>`) +
+      (this._adj || this._layout === "combined"
         ? `<div class="card"><div id="c-multi"></div></div>`
         : `<div class="charts"><div class="card"><div id="c-sg"></div></div><div class="card"><div id="c-abv"></div></div>` +
           `<div class="card"><div id="c-temp"></div></div><div class="card"><div id="c-vel"></div></div>` +
@@ -737,18 +903,24 @@ class RaptBatchesPanel extends HTMLElement {
   _drawDetail() {
     const b = this._current();
     const S = this._series;
-    if (this._layout === "combined") {
+    if (this._adj || this._layout === "combined") {
       const host = this.shadowRoot.getElementById("c-multi");
       if (host && this._lib) {
-        const prev = this._mcState && this._mcState.id === this._detailId ? this._mcState : null;
+        const adj = this._adj;
+        const prev = !this._skipState && this._mcState && this._mcState.id === this._detailId ? this._mcState : null;
+        this._skipState = false;
         const mc = createMultiChart(this._lib, host, {
-          series: S,
+          series: adj ? adj.series : S,
           og: b.og,
           height: 320,
           storageKey: "rapt_batches_chart",
           state: prev ? { enabled: prev.enabled, zoom: prev.zoom } : null,
+          window: adj ? { start: adj.start, end: adj.end } : null,
+          selectMode: !!adj,
+          onSelect: adj ? (range) => this._adjSelect(range) : undefined,
         });
         mc.batchId = this._detailId;
+        this._mc = mc;
         this._charts.push(mc);
       }
       return;

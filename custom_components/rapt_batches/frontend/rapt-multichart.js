@@ -55,7 +55,9 @@ export function lastAt(d, x) {
 
 // opts: series (the readings API result), og, height, storageKey (remember the toggles),
 // chips (show the toggles), initial (series on by default), allowed (limit the series),
-// state ({enabled, zoom} from a previous chart, to survive a redraw).
+// state ({enabled, zoom} from a previous chart, to survive a redraw),
+// window ({start, end} in seconds: everything outside is greyed out), selectMode (drag selects a
+// range instead of zooming) and onSelect(range|null).
 export function createMultiChart(lib, host, opts = {}) {
   const { series: S = {}, og = null, height = 300, storageKey = null, chips = true, state = null, allowed = null } = opts;
 
@@ -90,6 +92,8 @@ export function createMultiChart(lib, host, opts = {}) {
   const plotEl = host.querySelector(".mc-plot");
   const resetBtn = plotEl.querySelector(".mc-reset");
 
+  let win = opts.window ? { ...opts.window } : null;
+  let sel = null;
   let u = null;
   let full = null;
   let zoom = (state && state.zoom) || null;
@@ -106,6 +110,10 @@ export function createMultiChart(lib, host, opts = {}) {
   };
 
   function build() {
+    if (sel) {
+      sel = null; // a redraw drops the selection box
+      if (opts.onSelect) opts.onSelect(null);
+    }
     if (u) {
       zoom = currentZoom();
       u.destroy();
@@ -162,6 +170,41 @@ export function createMultiChart(lib, host, opts = {}) {
     tip.className = "mc-tip";
     const hooks = {
       ready: [(uu) => uu.over.appendChild(tip)],
+      draw: [
+        (uu) => {
+          if (!win) return;
+          const { ctx, bbox } = uu;
+          const left = bbox.left;
+          const right = bbox.left + bbox.width;
+          const clamp = (x) => Math.min(Math.max(x, left), right);
+          const x0 = clamp(uu.valToPos(win.start, "x", true));
+          const x1 = clamp(uu.valToPos(win.end, "x", true));
+          ctx.save();
+          ctx.fillStyle = "rgba(128,128,128,0.35)";
+          if (x0 - left > 0.5) ctx.fillRect(left, bbox.top, x0 - left, bbox.height);
+          if (right - x1 > 0.5) ctx.fillRect(x1, bbox.top, right - x1, bbox.height);
+          ctx.strokeStyle = OG_COLOR;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([6, 4]);
+          for (const x of [x0, x1]) {
+            if (x > left && x < right) {
+              ctx.beginPath();
+              ctx.moveTo(x, bbox.top);
+              ctx.lineTo(x, bbox.top + bbox.height);
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
+        },
+      ],
+      setSelect: [
+        (uu) => {
+          if (!opts.selectMode) return;
+          const sb = uu.select;
+          sel = sb.width > 3 ? { min: uu.posToVal(sb.left, "x"), max: uu.posToVal(sb.left + sb.width, "x") } : null;
+          if (opts.onSelect) opts.onSelect(sel);
+        },
+      ],
       setScale: [
         (uu, key) => {
           if (key !== "x") return;
@@ -198,7 +241,7 @@ export function createMultiChart(lib, host, opts = {}) {
         series: [{}, ...sers],
         axes,
         legend: { show: false },
-        cursor: { x: true, y: false, points: { show: false }, drag: { x: true, y: false } },
+        cursor: { x: true, y: false, points: { show: false }, drag: { x: true, y: false, setScale: !opts.selectMode } },
         hooks,
       },
       joined,
@@ -243,6 +286,23 @@ export function createMultiChart(lib, host, opts = {}) {
     },
     getState() {
       return { enabled: [...enabled], zoom: currentZoom() };
+    },
+    // Window editing: grey out what is outside, read and clear the dragged range, zoom into it.
+    setWindow(w) {
+      win = w ? { ...w } : null;
+      if (u) u.redraw(false);
+    },
+    getSelection() {
+      return sel;
+    },
+    clearSelection() {
+      sel = null;
+      if (u) u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
+      if (opts.onSelect) opts.onSelect(null);
+    },
+    zoomTo(range) {
+      this.clearSelection();
+      if (u) u.setScale("x", { min: Math.max(range.min, full[0]), max: Math.min(range.max, full[1]) });
     },
   };
 }

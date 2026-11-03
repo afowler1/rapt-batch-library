@@ -1,4 +1,5 @@
 // <rapt-batch-card>: one batch's summary and charts on a dashboard.
+import { MULTI_CSS, createMultiChart } from "./rapt-multichart.js";
 import { CARD_STYLE, CHART_LABEL, COLORS, LABEL, PANEL_PATH, abv, daysOf, drawChart, esc, fmt, liveValue, loadLib, navigate, pickBatch } from "./rapt-card-shared.js";
 
 const CHART_KEYS = ["sg", "abv", "temp", "velocity", "battery"];
@@ -24,7 +25,7 @@ class RaptBatchCard extends HTMLElement {
   }
 
   setConfig(config) {
-    this._config = { batch: "active", compact: false, charts: ["sg", "abv", "temp"], ...config };
+    this._config = { batch: "active", compact: false, layout: "separate", charts: ["sg", "abv", "temp"], series: ["sg", "temp"], toggles: true, ...config };
     this._load(true);
   }
   getCardSize() {
@@ -53,7 +54,11 @@ class RaptBatchCard extends HTMLElement {
   }
 
   _destroy() {
-    this._charts.forEach((c) => c.destroy());
+    this._charts.forEach((c) => {
+      // Keep the toggles and zoom across the once-a-minute redraw.
+      if (c.getState) this._mcState = { id: c.batchId, ...c.getState() };
+      c.destroy();
+    });
     this._charts = [];
   }
   _resize() {
@@ -135,15 +140,37 @@ class RaptBatchCard extends HTMLElement {
         `<div class="head" data-open title="Open the library"><h2>${esc(this._config.title || b.name)}</h2>` +
         `<span class="badge s-${b.status}">${LABEL[b.status]}</span></div>` +
         `<div class="stats" id="stats">${this._lastStats}</div>` +
-        (this._config.compact ? "" : keys.map((k) => `<div class="chart" id="c-${k}"></div>`).join(""));
+        (this._config.compact
+          ? ""
+          : this._config.layout === "combined"
+            ? `<div class="chart" id="c-multi"></div>`
+            : keys.map((k) => `<div class="chart" id="c-${k}"></div>`).join(""));
     }
-    this.shadowRoot.innerHTML = `<style>${CARD_STYLE}${this._lib ? this._lib.css : ""}</style><ha-card>${body}</ha-card>`;
+    this.shadowRoot.innerHTML = `<style>${CARD_STYLE}${MULTI_CSS}${this._lib ? this._lib.css : ""}</style><ha-card>${body}</ha-card>`;
     if (b && !this._error && !this._config.compact) this._draw(b);
   }
 
   _draw(b) {
     const S = this._series;
     const height = 200;
+    if (this._config.layout === "combined") {
+      const el = this.shadowRoot.getElementById("c-multi");
+      if (!el) return;
+      const wanted = (this._config.series || []).filter((k) => ["sg", "abv", "temp", "velocity", "battery"].includes(k));
+      const prev = this._mcState && this._mcState.id === b.id ? this._mcState : null;
+      const mc = createMultiChart(this._lib, el, {
+        series: S,
+        og: b.og,
+        height: 260,
+        chips: this._config.toggles !== false,
+        initial: wanted.length ? wanted : ["sg", "temp"],
+        allowed: this._config.toggles === false && wanted.length ? wanted : null,
+        state: prev ? { enabled: prev.enabled, zoom: prev.zoom } : null,
+      });
+      mc.batchId = b.id;
+      this._charts.push(mc);
+      return;
+    }
     const host = (k) => this.shadowRoot.getElementById("c-" + k);
     const add = (c) => c && this._charts.push(c);
     for (const k of (this._config.charts || []).filter((x) => CHART_KEYS.includes(x))) {
@@ -189,21 +216,10 @@ class RaptBatchCardEditor extends HTMLElement {
     this._render();
   }
 
-  _render() {
-    if (!this._hass || !this._config) return;
-    if (!this._form) {
-      this._form = document.createElement("ha-form");
-      this._form.addEventListener("value-changed", (e) => {
-        this._config = e.detail.value;
-        this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: this._config }, bubbles: true, composed: true }));
-      });
-      this.appendChild(this._form);
-    }
-    const labels = { title: "Title (optional)", batch: "Batch", charts: "Charts", compact: "Compact (numbers only)" };
-    this._form.hass = this._hass;
-    this._form.data = this._config;
-    this._form.computeLabel = (s) => labels[s.name] || s.name;
-    this._form.schema = [
+  _schema() {
+    const combined = this._config.layout === "combined";
+    const seriesOptions = CHART_KEYS.map((k) => ({ value: k, label: CHART_LABEL[k] }));
+    return [
       { name: "title", selector: { text: {} } },
       {
         name: "batch",
@@ -214,9 +230,42 @@ class RaptBatchCardEditor extends HTMLElement {
           },
         },
       },
-      { name: "charts", selector: { select: { multiple: true, mode: "list", options: CHART_KEYS.map((k) => ({ value: k, label: CHART_LABEL[k] })) } } },
+      {
+        name: "layout",
+        selector: { select: { mode: "dropdown", options: [{ value: "separate", label: "Separate charts" }, { value: "combined", label: "One combined chart" }] } },
+      },
+      combined
+        ? { name: "series", selector: { select: { multiple: true, mode: "list", options: seriesOptions } } }
+        : { name: "charts", selector: { select: { multiple: true, mode: "list", options: seriesOptions } } },
+      ...(combined ? [{ name: "toggles", selector: { boolean: {} } }] : []),
       { name: "compact", selector: { boolean: {} } },
     ];
+  }
+
+  _render() {
+    if (!this._hass || !this._config) return;
+    if (!this._form) {
+      this._form = document.createElement("ha-form");
+      this._form.addEventListener("value-changed", (e) => {
+        this._config = e.detail.value;
+        this._form.schema = this._schema(); // the fields depend on the layout
+        this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: this._config }, bubbles: true, composed: true }));
+      });
+      this.appendChild(this._form);
+    }
+    const labels = {
+      title: "Title (optional)",
+      batch: "Batch",
+      layout: "Layout",
+      charts: "Charts",
+      series: "Series to show",
+      toggles: "Let viewers toggle series",
+      compact: "Compact (numbers only)",
+    };
+    this._form.hass = this._hass;
+    this._form.data = this._config;
+    this._form.computeLabel = (s) => labels[s.name] || s.name;
+    this._form.schema = this._schema();
   }
 }
 

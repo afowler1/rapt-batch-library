@@ -265,7 +265,12 @@ class BatchStore:
     async def async_readings(
         self, batch_id: str, max_points: int = 1500
     ) -> dict[str, dict[str, list[float]]]:
-        """Readings per key as {t: [...], v: [...]}, bucket-averaged if long."""
+        """Readings per key as {t: [...], v: [...]}.
+
+        Short batches are returned raw. Long ones are averaged into buckets on one
+        shared time grid, so every metric gets the same timestamps (bucket centres)
+        and the combined chart can overlay them cleanly.
+        """
 
         def _q() -> dict[str, dict[str, list[float]]]:
             out: dict[str, dict[str, list[float]]] = {}
@@ -273,23 +278,30 @@ class BatchStore:
                 "SELECT key, COUNT(*), MIN(ts), MAX(ts) FROM readings WHERE batch_id = ? GROUP BY key",
                 (batch_id,),
             ).fetchall()
-            for key, count, lo, hi in stats:
-                if count <= max_points:
+            if not stats:
+                return out
+            bucketed = max(count for _k, count, _lo, _hi in stats) > max_points
+            lo = min(row[2] for row in stats)
+            hi = max(row[3] for row in stats)
+            width = max((hi - lo) / max_points, 1.0)
+            for key, _count, _klo, _khi in stats:
+                if not bucketed:
                     rows = self._conn.execute(
                         "SELECT ts, value FROM readings WHERE batch_id = ? AND key = ? ORDER BY ts",
                         (batch_id, key),
                     ).fetchall()
                 else:
-                    width = max((hi - lo) / max_points, 1.0)
-                    rows = self._conn.execute(
-                        """
-                        SELECT AVG(ts), AVG(value) FROM readings
-                        WHERE batch_id = ? AND key = ?
-                        GROUP BY CAST((ts - ?) / ? AS INTEGER)
-                        ORDER BY 1
-                        """,
-                        (batch_id, key, lo, width),
-                    ).fetchall()
+                    rows = [
+                        (lo + (b + 0.5) * width, v)
+                        for b, v in self._conn.execute(
+                            """
+                            SELECT CAST((ts - ?) / ? AS INTEGER) AS b, AVG(value) FROM readings
+                            WHERE batch_id = ? AND key = ?
+                            GROUP BY b ORDER BY b
+                            """,
+                            (lo, width, batch_id, key),
+                        )
+                    ]
                 out[key] = {"t": [r[0] for r in rows], "v": [r[1] for r in rows]}
             return out
 

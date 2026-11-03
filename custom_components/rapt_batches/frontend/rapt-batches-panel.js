@@ -1,6 +1,8 @@
 // RAPT Batches: "Brewing" sidebar panel. Plain web component, no build step.
 // Charts use the bundled uPlot (MIT) from this folder, so nothing is loaded from the internet.
 
+import { MULTI_CSS, createMultiChart } from "./rapt-multichart.js";
+
 const BASE = new URL("./", import.meta.url).href;
 const ABV_FACTOR = 131.25;
 const PALETTE = ["#f2b544", "#4fc3f7", "#4caf7d", "#e0763f", "#b57edc", "#ef5350"];
@@ -109,6 +111,12 @@ class RaptBatchesPanel extends HTMLElement {
     this._series = {};
     this._lib = null;
     this._ready = false;
+    try {
+      this._layout = localStorage.getItem("rapt_batches_layout") || "combined";
+    } catch (e) {
+      this._layout = "combined";
+    }
+    this._mcState = null;
     this._modal = null;
     this._imp = null;
     this._toastMsg = null;
@@ -369,6 +377,15 @@ class RaptBatchesPanel extends HTMLElement {
       case "import":
         await this._impOpen();
         break;
+      case "layout":
+        this._layout = t.dataset.v;
+        try {
+          localStorage.setItem("rapt_batches_layout", this._layout);
+        } catch (e) {
+          /* not remembered */
+        }
+        this._render();
+        break;
     }
   }
 
@@ -559,7 +576,11 @@ class RaptBatchesPanel extends HTMLElement {
   // ---- rendering ------------------------------------------------------
 
   _destroyCharts() {
-    this._charts.forEach((c) => c.destroy());
+    this._charts.forEach((c) => {
+      // Keep the chart's toggles and zoom so a refresh does not undo them.
+      if (c.getState) this._mcState = { id: c.batchId, ...c.getState() };
+      c.destroy();
+    });
     this._charts = [];
   }
 
@@ -582,7 +603,7 @@ class RaptBatchesPanel extends HTMLElement {
     }
     const showBack = this._view !== "list";
     this.shadowRoot.innerHTML =
-      `<style>${STYLE}${this._lib ? this._lib.css : ""}</style>` +
+      `<style>${STYLE}${MULTI_CSS}${this._lib ? this._lib.css : ""}</style>` +
       `<div class="bar">${this._narrow ? '<button class="icon" data-act="menu" title="Menu">&#9776;</button>' : ""}` +
       `<h1>${esc(this._title)}</h1>` +
       (showBack ? '<button data-act="back">&larr; Batches</button>' : '<button data-act="new">New batch</button>') +
@@ -655,9 +676,13 @@ class RaptBatchesPanel extends HTMLElement {
       `<label>Final gravity<input id="f-fg" type="number" step="0.001" value="${b.fg ?? ""}" ${b.status === "active" ? "disabled" : ""}></label></div>` +
       `<textarea id="f-notes" placeholder="Notes: recipe, yeast, tasting...">${esc(b.notes || "")}</textarea>` +
       `<div class="actions" style="margin:12px 0 0"><button class="primary" data-act="save">Save details</button></div></div>` +
-      `<div class="charts"><div class="card"><div id="c-sg"></div></div><div class="card"><div id="c-abv"></div></div>` +
-      `<div class="card"><div id="c-temp"></div></div><div class="card"><div id="c-vel"></div></div>` +
-      `<div class="card"><div id="c-bat"></div></div></div>`;
+      `<div class="chips"><button class="chip ${this._layout === "combined" ? "on" : ""}" data-act="layout" data-v="combined">Combined chart</button>` +
+      `<button class="chip ${this._layout === "combined" ? "" : "on"}" data-act="layout" data-v="separate">Separate charts</button></div>` +
+      (this._layout === "combined"
+        ? `<div class="card"><div id="c-multi"></div></div>`
+        : `<div class="charts"><div class="card"><div id="c-sg"></div></div><div class="card"><div id="c-abv"></div></div>` +
+          `<div class="card"><div id="c-temp"></div></div><div class="card"><div id="c-vel"></div></div>` +
+          `<div class="card"><div id="c-bat"></div></div></div>`);
   }
 
   _compareHtml() {
@@ -712,6 +737,22 @@ class RaptBatchesPanel extends HTMLElement {
   _drawDetail() {
     const b = this._current();
     const S = this._series;
+    if (this._layout === "combined") {
+      const host = this.shadowRoot.getElementById("c-multi");
+      if (host && this._lib) {
+        const prev = this._mcState && this._mcState.id === this._detailId ? this._mcState : null;
+        const mc = createMultiChart(this._lib, host, {
+          series: S,
+          og: b.og,
+          height: 320,
+          storageKey: "rapt_batches_chart",
+          state: prev ? { enabled: prev.enabled, zoom: prev.zoom } : null,
+        });
+        mc.batchId = this._detailId;
+        this._charts.push(mc);
+      }
+      return;
+    }
     const sg = S.sg;
     this._chart("c-sg", "Specific gravity", sg ? [sg.t, sg.v, sg.t.map(() => b.og)] : [[]], [
       { label: "SG", color: COLORS.sg, width: 3 },

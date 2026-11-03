@@ -32,7 +32,7 @@ from .const import (
     entity_key,
     signal,
 )
-from .importers import parse as parse_import
+from .importers import parse as parse_import, suggest_og_fg
 from .store import BatchStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -113,11 +113,39 @@ class BatchManager:
 
         self._unsubs.append(async_track_state_change_event(self.hass, list(entities), _handle))
 
+    async def _async_history(self, entity_id: str, begin: Any, end: Any) -> list[tuple[float, float]]:
+        """Numeric states of an entity between two datetimes, from the recorder.
+
+        The state in force at `begin` is stamped at `begin`, not at whenever it last
+        changed, so it falls inside the window being filled.
+        """
+        from homeassistant.components.recorder import get_instance, history
+
+        states = await get_instance(self.hass).async_add_executor_job(
+            partial(
+                history.get_significant_states,
+                self.hass,
+                begin,
+                end,
+                [entity_id],
+                include_start_time_state=True,
+                significant_changes_only=False,
+                no_attributes=True,
+            )
+        )
+        floor = begin.timestamp()
+        out: list[tuple[float, float]] = []
+        for st in states.get(entity_id, []):
+            try:
+                value = float(st.state)
+            except (ValueError, TypeError):
+                continue
+            out.append((max(st.last_updated.timestamp(), floor), value))
+        return out
+
     async def _async_backfill(self, sid: str, data: Any, since: dict[str, float]) -> None:
         """Fill history from the recorder, from the last stored reading onward."""
         try:
-            from homeassistant.components.recorder import get_instance, history
-
             batch_start = dt_util.parse_datetime(data[CONF_START])
             end = (
                 dt_util.parse_datetime(data[CONF_END])
@@ -134,28 +162,27 @@ class BatchManager:
                     begin = max(begin, dt_util.utc_from_timestamp(since[key]))
                 if begin >= end:
                     continue
-                states = await get_instance(self.hass).async_add_executor_job(
-                    partial(
-                        history.get_significant_states,
-                        self.hass,
-                        begin,
-                        end,
-                        [eid],
-                        include_start_time_state=True,
-                        significant_changes_only=False,
-                        no_attributes=True,
-                    )
-                )
-                for st in states.get(eid, []):
-                    try:
-                        value = float(st.state)
-                    except (ValueError, TypeError):
-                        continue
-                    rows.append((key, st.last_updated.timestamp(), value))
+                rows.extend((key, ts, value) for ts, value in await self._async_history(eid, begin, end))
             await self.store.async_add_readings(sid, rows)
             _LOGGER.debug("Backfilled %s readings for batch %s", len(rows), sid)
         except Exception:  # noqa: BLE001
             _LOGGER.warning("Backfill failed for batch %s", sid, exc_info=True)
+
+    async def _async_fetch_range(self, bid: str, config: Any, begin_ts: float, end_ts: float) -> int:
+        """Pull a stretch of history from the recorder for a batch. Returns new readings added."""
+        added = 0
+        try:
+            begin = dt_util.utc_from_timestamp(begin_ts)
+            end = dt_util.utc_from_timestamp(end_ts)
+            for key in KEYS:
+                eid = config.get(entity_key(key))
+                if not eid:
+                    continue
+                rows = [(key, ts, v) for ts, v in await self._async_history(eid, begin, end)]
+                added += await self.store.async_add_readings(bid, rows)
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Could not read the recorder for batch %s", bid, exc_info=True)
+        return added
 
     # ---- helpers -----------------------------------------------------
 
@@ -268,15 +295,22 @@ class BatchManager:
                 row["latest"] = {**row["latest"], **self.latest.get(row["id"], {})}
         return rows
 
-    async def async_readings(self, bid: str, max_points: int) -> dict[str, Any]:
-        return {"series": await self.store.async_readings(bid, max_points)}
+    async def async_readings(self, bid: str, max_points: int, include_hidden: bool = False) -> dict[str, Any]:
+        row = await self.store.async_get_batch(bid)
+        if row is None:
+            raise HomeAssistantError("Batch not found")
+        window = None if include_hidden else (row["start_ts"], row["end_ts"])
+        return {
+            "series": await self.store.async_readings(bid, max_points, window),
+            "window": {"start_ts": row["start_ts"], "end_ts": row["end_ts"]},
+        }
 
     async def async_export(self, bid: str) -> dict[str, str]:
         row = await self.store.async_get_batch(bid)
         if row is None:
             raise HomeAssistantError("Batch not found")
         table: dict[int, dict[str, float]] = {}
-        for key, ts, value in await self.store.async_all_readings(bid):
+        for key, ts, value in await self.store.async_all_readings(bid, (row["start_ts"], row["end_ts"])):
             table.setdefault(int(round(ts / 60) * 60), {})[key] = value
         out = io.StringIO()
         writer = csv.writer(out)
@@ -315,3 +349,65 @@ class BatchManager:
         )
         await self.store.async_add_readings(bid, result.rows)
         return bid
+
+    # ---- window ------------------------------------------------------
+
+    async def async_window_preview(self, bid: str, start_ts: float, end_ts: float) -> dict[str, Any]:
+        """What a window would contain, without changing anything."""
+        if await self.store.async_get_batch(bid) is None:
+            raise HomeAssistantError("Batch not found")
+        series = await self.store.async_sg_series(bid, start_ts, end_ts)
+        out: dict[str, Any] = {"readings": len(series), "og_guess": None, "fg_guess": None}
+        if series:
+            out["og_guess"], out["fg_guess"] = suggest_og_fg(series)
+        return out
+
+    async def async_set_window(
+        self, bid: str, start_ts: float, end_ts: float, recalc: bool = False
+    ) -> dict[str, Any]:
+        """Change a finished or archived batch's start and end.
+
+        Readings outside the window stay stored, only hidden, so the change can be
+        undone. Widening it asks the recorder for the extra stretch (batches recorded
+        here only; imported ones cannot grow past their file).
+        """
+        row = await self.store.async_get_batch(bid)
+        if row is None:
+            raise HomeAssistantError("Batch not found")
+        if row["status"] == STATUS_ACTIVE:
+            raise HomeAssistantError("Finish the batch before adjusting its window")
+        if end_ts > dt_util.utcnow().timestamp() + 60:
+            raise HomeAssistantError("The end cannot be in the future")
+        if start_ts >= end_ts - 60:
+            raise HomeAssistantError("The start must be at least a minute before the end")
+
+        config = row["config"]
+        can_record = bool(config.get(entity_key("sg")))
+        added = 0
+        if can_record:
+            old_start, old_end = row["start_ts"], row["end_ts"] or end_ts
+            if start_ts < old_start:
+                added += await self._async_fetch_range(bid, config, start_ts, old_start)
+            if end_ts > old_end:
+                added += await self._async_fetch_range(bid, config, old_end, end_ts)
+
+        series = await self.store.async_sg_series(bid, start_ts, end_ts)
+        if len(series) < 2:
+            raise HomeAssistantError("That window has fewer than two gravity readings")
+        og, fg = row["og"], row["fg"]
+        if recalc:
+            og, fg = suggest_og_fg(series)
+
+        await self.store.async_update_window(bid, start_ts, end_ts, og, fg)
+        sub = self.entry.subentries.get(bid)
+        if sub is not None:  # still on the integration page: keep its copy in step
+            new = {
+                **sub.data,
+                CONF_START: dt_util.utc_from_timestamp(start_ts).isoformat(),
+                CONF_END: dt_util.utc_from_timestamp(end_ts).isoformat(),
+                CONF_OG: og,
+                CONF_FG: fg,
+            }
+            if new != dict(sub.data):
+                self.hass.config_entries.async_update_subentry(self.entry, sub, data=new)
+        return {"added": added, "og": og, "fg": fg, "can_record": can_record, "readings": len(series)}

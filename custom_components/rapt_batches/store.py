@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from homeassistant.core import HomeAssistant
@@ -111,7 +112,8 @@ class BatchStore:
                 """
                 SELECT r.batch_id, r.key, r.value FROM readings r
                 WHERE r.ts = (SELECT MAX(ts) FROM readings
-                              WHERE batch_id = r.batch_id AND key = r.key)
+                              WHERE batch_id = r.batch_id AND key = r.key
+                                AND ts <= COALESCE((SELECT end_ts FROM batches WHERE id = r.batch_id), 1e18))
                 """
             ):
                 latest.setdefault(bid, {})[key] = val
@@ -223,19 +225,20 @@ class BatchStore:
 
     async def async_add_readings(
         self, batch_id: str, rows: list[tuple[str, float, float]]
-    ) -> None:
-        """Insert (key, ts, value) rows, ignoring duplicates."""
+    ) -> int:
+        """Insert (key, ts, value) rows, ignoring duplicates. Returns how many were new."""
         if not rows:
-            return
+            return 0
 
-        def _q() -> None:
-            self._conn.executemany(
+        def _q() -> int:
+            cur = self._conn.executemany(
                 "INSERT OR IGNORE INTO readings (batch_id, key, ts, value) VALUES (?, ?, ?, ?)",
                 [(batch_id, k, ts, v) for k, ts, v in rows],
             )
             self._conn.commit()
+            return cur.rowcount
 
-        await self._run(_q)
+        return await self._run(_q)
 
     async def async_latest(self, batch_id: str) -> dict[str, float]:
         def _q() -> dict[str, float]:
@@ -244,7 +247,8 @@ class BatchStore:
                 SELECT r.key, r.value FROM readings r
                 WHERE r.batch_id = ?
                   AND r.ts = (SELECT MAX(ts) FROM readings
-                              WHERE batch_id = r.batch_id AND key = r.key)
+                              WHERE batch_id = r.batch_id AND key = r.key
+                                AND ts <= COALESCE((SELECT end_ts FROM batches WHERE id = r.batch_id), 1e18))
                 """,
                 (batch_id,),
             ).fetchall()
@@ -263,55 +267,129 @@ class BatchStore:
         return await self._run(_q)
 
     async def async_readings(
-        self, batch_id: str, max_points: int = 1500
+        self,
+        batch_id: str,
+        max_points: int = 1500,
+        window: tuple[float | None, float | None] | None = None,
     ) -> dict[str, dict[str, list[float]]]:
         """Readings per key as {t: [...], v: [...]}.
+
+        window=(start, end) hides readings outside it (None means no limit on that
+        side; window=None returns everything). Inside a window, a sensor's value at
+        the start is carried in, so a slowly changing sensor such as the battery
+        still has a reading when its last change was before the start.
 
         Short batches are returned raw. Long ones are averaged into buckets on one
         shared time grid, so every metric gets the same timestamps (bucket centres)
         and the combined chart can overlay them cleanly.
         """
+        w_lo, w_hi = window if window else (None, None)
 
         def _q() -> dict[str, dict[str, list[float]]]:
-            out: dict[str, dict[str, list[float]]] = {}
+            where, params = "batch_id = ?", [batch_id]
+            if w_lo is not None:
+                where += " AND ts >= ?"
+                params.append(w_lo)
+            if w_hi is not None:
+                where += " AND ts <= ?"
+                params.append(w_hi)
             stats = self._conn.execute(
-                "SELECT key, COUNT(*), MIN(ts), MAX(ts) FROM readings WHERE batch_id = ? GROUP BY key",
-                (batch_id,),
+                f"SELECT key, COUNT(*), MIN(ts), MAX(ts) FROM readings WHERE {where} GROUP BY key",
+                params,
             ).fetchall()
-            if not stats:
-                return out
-            bucketed = max(count for _k, count, _lo, _hi in stats) > max_points
-            lo = min(row[2] for row in stats)
-            hi = max(row[3] for row in stats)
-            width = max((hi - lo) / max_points, 1.0)
-            for key, _count, _klo, _khi in stats:
-                if not bucketed:
-                    rows = self._conn.execute(
-                        "SELECT ts, value FROM readings WHERE batch_id = ? AND key = ? ORDER BY ts",
-                        (batch_id, key),
-                    ).fetchall()
-                else:
-                    rows = [
-                        (lo + (b + 0.5) * width, v)
-                        for b, v in self._conn.execute(
-                            """
-                            SELECT CAST((ts - ?) / ? AS INTEGER) AS b, AVG(value) FROM readings
-                            WHERE batch_id = ? AND key = ?
-                            GROUP BY b ORDER BY b
-                            """,
-                            (lo, width, batch_id, key),
-                        )
-                    ]
-                out[key] = {"t": [r[0] for r in rows], "v": [r[1] for r in rows]}
+            out: dict[str, dict[str, list[float]]] = {}
+            data_hi = max((row[3] for row in stats), default=None)
+            if stats:
+                bucketed = max(count for _k, count, _lo, _hi in stats) > max_points
+                lo = min(row[2] for row in stats)
+                width = max((data_hi - lo) / max_points, 1.0)
+                for key, _count, _klo, _khi in stats:
+                    if not bucketed:
+                        rows = self._conn.execute(
+                            f"SELECT ts, value FROM readings WHERE {where} AND key = ? ORDER BY ts",
+                            [*params, key],
+                        ).fetchall()
+                    else:
+                        rows = [
+                            (lo + (b + 0.5) * width, v)
+                            for b, v in self._conn.execute(
+                                f"""
+                                SELECT CAST((ts - ?) / ? AS INTEGER) AS b, AVG(value) FROM readings
+                                WHERE {where} AND key = ?
+                                GROUP BY b ORDER BY b
+                                """,
+                                [lo, width, *params, key],
+                            )
+                        ]
+                    out[key] = {"t": [r[0] for r in rows], "v": [r[1] for r in rows]}
+            if w_lo is not None:
+                keys = [r[0] for r in self._conn.execute("SELECT DISTINCT key FROM readings WHERE batch_id = ?", (batch_id,))]
+                for key in keys:
+                    carried = self._conn.execute(
+                        "SELECT value FROM readings WHERE batch_id = ? AND key = ? AND ts < ? ORDER BY ts DESC LIMIT 1",
+                        (batch_id, key, w_lo),
+                    ).fetchone()
+                    if carried is None:
+                        continue
+                    series = out.get(key)
+                    if series is None:  # nothing changed inside the window: hold the value across it
+                        end = w_hi if w_hi is not None else (data_hi if data_hi is not None else w_lo)
+                        out[key] = {"t": [w_lo, max(end, w_lo)], "v": [carried[0], carried[0]]}
+                    elif series["t"][0] > w_lo:
+                        series["t"].insert(0, w_lo)
+                        series["v"].insert(0, carried[0])
             return out
 
         return await self._run(_q)
 
-    async def async_all_readings(self, batch_id: str) -> list[tuple[str, float, float]]:
-        def _q() -> list[tuple[str, float, float]]:
+    async def async_sg_series(self, batch_id: str, start: float, end: float) -> list[tuple[float, float]]:
+        """Gravity readings strictly inside [start, end], oldest first."""
+
+        def _q() -> list[tuple[float, float]]:
             return self._conn.execute(
-                "SELECT key, ts, value FROM readings WHERE batch_id = ? ORDER BY ts",
-                (batch_id,),
+                "SELECT ts, value FROM readings WHERE batch_id = ? AND key = 'sg' AND ts >= ? AND ts <= ? ORDER BY ts",
+                (batch_id, start, end),
+            ).fetchall()
+
+        return await self._run(_q)
+
+    async def async_update_window(
+        self, batch_id: str, start_ts: float, end_ts: float, og: float | None, fg: float | None
+    ) -> None:
+        """Change a batch's window (and OG/FG), in the columns and the stored config copy."""
+
+        def _iso(ts: float) -> str:
+            return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+
+        def _q() -> None:
+            row = self._conn.execute("SELECT config FROM batches WHERE id = ?", (batch_id,)).fetchone()
+            if row is None:
+                return
+            config = json.loads(row[0]) if row[0] else {}
+            config.update({"start": _iso(start_ts), "end": _iso(end_ts), "og": og, "fg": fg})
+            self._conn.execute(
+                "UPDATE batches SET start_ts = ?, end_ts = ?, og = ?, fg = ?, config = ? WHERE id = ?",
+                (start_ts, end_ts, og, fg, json.dumps(config), batch_id),
+            )
+            self._conn.commit()
+
+        await self._run(_q)
+
+    async def async_all_readings(
+        self, batch_id: str, window: tuple[float | None, float | None] | None = None
+    ) -> list[tuple[str, float, float]]:
+        w_lo, w_hi = window if window else (None, None)
+
+        def _q() -> list[tuple[str, float, float]]:
+            where, params = "batch_id = ?", [batch_id]
+            if w_lo is not None:
+                where += " AND ts >= ?"
+                params.append(w_lo)
+            if w_hi is not None:
+                where += " AND ts <= ?"
+                params.append(w_hi)
+            return self._conn.execute(
+                f"SELECT key, ts, value FROM readings WHERE {where} ORDER BY ts", params
             ).fetchall()
 
         return await self._run(_q)

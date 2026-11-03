@@ -56,12 +56,16 @@ async def ws_list(hass, connection, msg) -> None:
         vol.Required("type"): "rapt_batches/readings",
         vol.Required("batch_id"): str,
         vol.Optional("max_points", default=1500): vol.All(int, vol.Range(min=50, max=10000)),
+        vol.Optional("include_hidden", default=False): bool,
     }
 )
 @websocket_api.async_response
 async def ws_readings(hass, connection, msg) -> None:
     await _with_manager(
-        hass, connection, msg, lambda m: m.async_readings(msg["batch_id"], msg["max_points"])
+        hass,
+        connection,
+        msg,
+        lambda m: m.async_readings(msg["batch_id"], msg["max_points"], msg["include_hidden"]),
     )
 
 
@@ -172,6 +176,41 @@ async def ws_import(hass, connection, msg) -> None:
     await _with_manager(hass, connection, msg, _call)
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/window_preview",
+        vol.Required("batch_id"): str,
+        vol.Required("start"): vol.Coerce(float),
+        vol.Required("end"): vol.Coerce(float),
+    }
+)
+@websocket_api.async_response
+async def ws_window_preview(hass, connection, msg) -> None:
+    await _with_manager(
+        hass, connection, msg, lambda m: m.async_window_preview(msg["batch_id"], msg["start"], msg["end"])
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/set_window",
+        vol.Required("batch_id"): str,
+        vol.Required("start"): vol.Coerce(float),
+        vol.Required("end"): vol.Coerce(float),
+        vol.Optional("recalc", default=False): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_set_window(hass, connection, msg) -> None:
+    await _with_manager(
+        hass,
+        connection,
+        msg,
+        lambda m: m.async_set_window(msg["batch_id"], msg["start"], msg["end"], msg["recalc"]),
+    )
+
+
 def async_register(hass: HomeAssistant) -> None:
     for handler in (
         ws_list,
@@ -182,5 +221,7 @@ def async_register(hass: HomeAssistant) -> None:
         ws_import_sources,
         ws_import_preview,
         ws_import,
+        ws_window_preview,
+        ws_set_window,
     ):
         websocket_api.async_register_command(hass, handler)

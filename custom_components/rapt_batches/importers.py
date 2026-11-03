@@ -54,6 +54,18 @@ class ImportResult:
         }
 
 
+def suggest_og_fg(sg: list[tuple[float, float]]) -> tuple[float, float]:
+    """OG: the highest gravity in the first day. FG: the median of the last 12 hours.
+
+    The first readings of a batch wobble while the Pill settles, so the very first
+    value is a poor OG; the very last can be the Pill leaving the fermenter."""
+    rows = sorted(sg)
+    first_ts, last_ts = rows[0][0], rows[-1][0]
+    og = max(v for ts, v in rows if ts <= first_ts + 86400)
+    fg = statistics.median(v for ts, v in rows if ts >= last_ts - 43200)
+    return round(og, 4), round(fg, 4)
+
+
 def _parse_time(value: str) -> float | None:
     try:
         parsed = datetime.fromisoformat(_FRACTION.sub(r"\1", value.strip()))
@@ -140,8 +152,7 @@ def parse_legacy_rapt(text: str) -> ImportResult:
         raise HomeAssistantError("Every gravity reading in the file looks implausible.")
 
     first_ts, last_ts = records[0][0], records[-1][0]
-    og_guess = max(v["sg"] for ts, v in records if ts <= first_ts + 86400)
-    fg_guess = statistics.median(v["sg"] for ts, v in records if ts >= last_ts - 43200)
+    og_guess, fg_guess = suggest_og_fg([(ts, v["sg"]) for ts, v in records])
     rows = [(key, ts, number) for ts, v in records for key, number in v.items()]
     return ImportResult(
         rows=rows,
@@ -150,8 +161,8 @@ def parse_legacy_rapt(text: str) -> ImportResult:
         trimmed=trimmed,
         start_ts=first_ts,
         end_ts=last_ts,
-        og_guess=round(og_guess, 4),
-        fg_guess=round(fg_guess, 4),
+        og_guess=og_guess,
+        fg_guess=fg_guess,
     )
 
 

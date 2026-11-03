@@ -1,10 +1,7 @@
 """RAPT Batches: keep fermentation batch data outside the HA recorder."""
 from __future__ import annotations
 
-from pathlib import Path
-
 from homeassistant.components import frontend, panel_custom
-from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -12,6 +9,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
 from . import websocket
+from .assets import async_register_frontend
 from .const import (
     CONF_PANEL_ICON,
     CONF_PANEL_TITLE,
@@ -24,7 +22,6 @@ from .const import (
     PLATFORMS,
     STATIC_URL,
     STATUS_ACTIVE,
-    VERSION,
 )
 from .manager import BatchManager
 from .resources import async_register_cards, async_remove_cards
@@ -64,13 +61,12 @@ async def _async_register_panel(hass: HomeAssistant, entry: ConfigEntry) -> None
     icon = settings.get(CONF_PANEL_ICON) or DEFAULT_PANEL_ICON
     flags = hass.data.setdefault(DOMAIN, {})
     if not flags.get("static"):
-        await hass.http.async_register_static_paths(
-            [StaticPathConfig(STATIC_URL, str(Path(__file__).parent / "frontend"), False)]
-        )
+        flags["asset_version"] = await async_register_frontend(hass)
         flags["static"] = True
+    base = f"{STATIC_URL}/{flags['asset_version']}"
     if not flags.get("cards"):
-        frontend.add_extra_js_url(hass, f"{STATIC_URL}/rapt-cards.js?v={VERSION}")
-        flags["cards"] = True
+        flags["cards"] = f"{base}/rapt-cards.js"
+        frontend.add_extra_js_url(hass, flags["cards"])
     if flags.get("panel") and flags.get("panel_cfg") != (title, icon):
         frontend.async_remove_panel(hass, PANEL_URL)  # title or icon changed
         flags["panel"] = False
@@ -81,7 +77,7 @@ async def _async_register_panel(hass: HomeAssistant, entry: ConfigEntry) -> None
             webcomponent_name="rapt-batches-panel",
             sidebar_title=title,
             sidebar_icon=icon,
-            module_url=f"{STATIC_URL}/rapt-batches-panel.js?v={VERSION}",
+            module_url=f"{base}/rapt-batches-panel.js",
             embed_iframe=False,
             require_admin=False,
             config={"title": title},
@@ -122,8 +118,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         frontend.async_remove_panel(hass, PANEL_URL)
         flags["panel"] = False
     if flags.get("cards"):
-        frontend.remove_extra_js_url(hass, f"{STATIC_URL}/rapt-cards.js?v={VERSION}")
-        flags["cards"] = False
+        frontend.remove_extra_js_url(hass, flags["cards"])
+        flags["cards"] = None
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

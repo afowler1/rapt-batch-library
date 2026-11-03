@@ -9,19 +9,22 @@ the default. In YAML mode the resource has to be added by hand.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from .const import STATIC_URL, VERSION
+from .const import DOMAIN, STATIC_URL
 
 _LOGGER = logging.getLogger(__name__)
 
-CARDS_PATH = f"{STATIC_URL}/rapt-cards.js"
+# Ours, whichever way the URL was written: /<static>/<hash>/rapt-cards.js, or the
+# older /<static>/rapt-cards.js?v=... that earlier versions (or a hand-made test) used.
+_OURS = re.compile(rf"^{re.escape(STATIC_URL)}(/[^/]+)?/rapt-cards\.js$")
 
 
-def cards_url() -> str:
-    return f"{CARDS_PATH}?v={VERSION}"
+def cards_url(hass: HomeAssistant) -> str:
+    return f"{STATIC_URL}/{hass.data[DOMAIN]['asset_version']}/rapt-cards.js"
 
 
 def _collection(hass: HomeAssistant) -> Any | None:
@@ -39,12 +42,12 @@ async def _items(resources: Any) -> list[dict[str, Any]]:
     if not getattr(resources, "loaded", True):
         await resources.async_load()
         resources.loaded = True
-    return [i for i in resources.async_items() if str(i.get("url", "")).split("?")[0] == CARDS_PATH]
+    return [i for i in resources.async_items() if _OURS.match(str(i.get("url", "")).split("?")[0])]
 
 
 async def async_register_cards(hass: HomeAssistant) -> None:
     """Make sure exactly one resource points at the current cards URL."""
-    url = cards_url()
+    url = cards_url(hass)
     resources = _collection(hass)
     if resources is None:
         _LOGGER.info(

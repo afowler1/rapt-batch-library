@@ -32,7 +32,8 @@ from .const import (
     entity_key,
     signal,
 )
-from .importers import parse as parse_import, suggest_og_fg
+from . import rapt_brew
+from .importers import ImportResult, parse as parse_import, suggest_og_fg
 from .store import BatchStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -329,6 +330,18 @@ class BatchManager:
     ) -> str:
         """Create an archived batch from another tool's export."""
         result = await self.hass.async_add_executor_job(parse_import, source, text)
+        return await self._async_store_import(source, result, name, og, fg)
+
+    async def async_import_remote(
+        self, cookie: str, recording: str, name: str | None, og: float | None, fg: float | None
+    ) -> str:
+        """Pull a recording from the RAPT Brew website and store it as an archived batch."""
+        title, result = await rapt_brew.async_pull(self.hass, cookie, recording)
+        return await self._async_store_import("rapt_brew", result, name or title, og, fg)
+
+    async def _async_store_import(
+        self, source: str, result: ImportResult, name: str, og: float | None, fg: float | None
+    ) -> str:
         existing = await self.store.async_list_batches()
         if any(abs(b["start_ts"] - result.start_ts) < 1 for b in existing):
             raise HomeAssistantError("A batch that starts at the same time already exists.")

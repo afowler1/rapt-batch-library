@@ -27,6 +27,18 @@ Fermentation data is kept in `config/rapt_batches.db`, not the recorder, so it s
   compare up to 6 batches, unarchive, and delete (archived batches only).
 - Each non-archived batch is a device with ABV, days fermenting and status sensors.
 
+## Importing past batches
+Brewing panel -> **Import**. Two sources:
+- **Legacy RAPT Portal**: upload the CSV you exported from the old portal.
+- **RAPT Brew website (brew.rapt.io)**: the new site has no export button, so the panel pulls a *finished*
+  recording for you. Enter the recording number (or paste the chart page address,
+  `https://brew.rapt.io/batch/rec/<number>/chart`) and your RAPT login cookie, pick the recording, and import.
+  The dialog explains how to copy the cookie (easy on a computer, awkward on a phone). The cookie is treated like a
+  password: it is used for that import only and never stored. Imports are admin only and land in Archived.
+
+## Tests
+`python -m unittest discover -s tests` (no Home Assistant install needed).
+
 ## Notes
 - HA's date-time picker always shows a seconds field; the form defaults it to :00 and the integration ignores seconds.
 - Charts use the bundled uPlot library (MIT); nothing is loaded from the internet.

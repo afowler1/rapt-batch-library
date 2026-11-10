@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from . import importers
+from . import importers, rapt_brew
 from .const import DOMAIN
 from .manager import BatchManager
 
@@ -176,6 +176,66 @@ async def ws_import(hass, connection, msg) -> None:
     await _with_manager(hass, connection, msg, _call)
 
 
+# The RAPT site commands take the user's login cookie. They are admin only because
+# they make requests from the server, and the cookie is used for that call alone.
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/remote_list",
+        vol.Required("cookie"): str,
+        vol.Required("recording"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_remote_list(hass, connection, msg) -> None:
+    try:
+        result = await rapt_brew.async_list_recordings(hass, msg["cookie"], msg["recording"])
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "failed", str(err))
+        return
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/remote_preview",
+        vol.Required("cookie"): str,
+        vol.Required("recording"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_remote_preview(hass, connection, msg) -> None:
+    try:
+        title, result = await rapt_brew.async_pull(hass, msg["cookie"], msg["recording"])
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "failed", str(err))
+        return
+    connection.send_result(msg["id"], {**result.summary(), "title": title})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "rapt_batches/remote_import",
+        vol.Required("cookie"): str,
+        vol.Required("recording"): str,
+        vol.Required("name"): vol.All(str, vol.Length(min=1)),
+        vol.Optional("og"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("fg"): vol.Any(None, vol.Coerce(float)),
+    }
+)
+@websocket_api.async_response
+async def ws_remote_import(hass, connection, msg) -> None:
+    async def _call(m: BatchManager) -> Any:
+        bid = await m.async_import_remote(
+            msg["cookie"], msg["recording"], msg["name"].strip(), msg.get("og"), msg.get("fg")
+        )
+        return {"id": bid}
+
+    await _with_manager(hass, connection, msg, _call)
+
+
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "rapt_batches/window_preview",
@@ -221,6 +281,9 @@ def async_register(hass: HomeAssistant) -> None:
         ws_import_sources,
         ws_import_preview,
         ws_import,
+        ws_remote_list,
+        ws_remote_preview,
+        ws_remote_import,
         ws_window_preview,
         ws_set_window,
     ):

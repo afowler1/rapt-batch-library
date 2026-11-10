@@ -135,6 +135,17 @@ def parse_legacy_rapt(text: str) -> ImportResult:
             "Gravity values do not look like specific gravity (for example 1.050). Plato and Brix exports are not supported yet."
         )
 
+    return build_result(records, skipped)
+
+
+def build_result(records: list[tuple[float, dict[str, float]]], skipped: int = 0) -> ImportResult:
+    """Clean parsed (unix_ts, {key: value}) records and turn them into an ImportResult.
+
+    Every source shares this: gravity must already be specific gravity (1.050).
+    Drops implausible gravities and a jump at the very end, and guesses OG and FG.
+    """
+    if not records:
+        raise HomeAssistantError("No valid gravity readings were found.")
     records.sort(key=lambda r: r[0])
     before = len(records)
     records = [r for r in records if SG_MIN <= r[1]["sg"] <= SG_MAX]
@@ -174,6 +185,13 @@ SOURCES: dict[str, dict[str, Any]] = {
         "accept": ".csv,.tsv,.txt",
         "parse": parse_legacy_rapt,
     },
+    # Pulled live from the website rather than read from a file: see rapt_brew.py.
+    "rapt_brew": {
+        "kind": "remote",
+        "label": "RAPT Brew website (brew.rapt.io)",
+        "description": "Pull a finished recording straight from the new RAPT site, which has no export button. Needs your login cookie.",
+        "help": "Enter the recording from the chart page address, and your RAPT login cookie.",
+    },
 }
 
 
@@ -188,5 +206,7 @@ def parse(source: str, text: str) -> ImportResult:
     src = SOURCES.get(source)
     if src is None:
         raise HomeAssistantError(f"Unknown import source '{source}'")
-    parser: Callable[[str], ImportResult] = src["parse"]
+    parser: Callable[[str], ImportResult] | None = src.get("parse")
+    if parser is None:
+        raise HomeAssistantError(f"'{source}' is pulled from a website, not read from a file")
     return parser(text)

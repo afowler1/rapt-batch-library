@@ -99,6 +99,15 @@ tr.row{cursor:pointer}
 .dialog p{margin:0 0 16px;color:var(--secondary-text-color);line-height:1.4}
 .dialog input{width:100%;margin-bottom:16px}
 .dialog .btns{display:flex;justify-content:flex-end;gap:8px}
+.dialog.wide{max-width:560px;max-height:90vh;overflow:auto}
+.dialog ol,.dialog ul{margin:0 0 12px;padding-left:20px;line-height:1.5}
+.dialog li{margin-bottom:6px}
+.dialog .warn{background:var(--secondary-background-color);border-radius:8px;padding:10px 12px;font-size:13px;margin:0 0 12px}
+.dialog code{background:var(--secondary-background-color);padding:1px 5px;border-radius:4px;word-break:break-all}
+.linkbtn{border:none;background:none;color:var(--primary-color);padding:0;border-radius:0;text-decoration:underline;margin:0 0 12px;display:block}
+.rec{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;margin:0 0 8px;border-radius:12px;padding:10px 14px}
+.rec span{color:var(--secondary-text-color);font-size:12px;white-space:nowrap}
+.rec:disabled{opacity:.5}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:11;padding:10px 20px;border-radius:24px;background:#323232;color:#fff;box-shadow:0 4px 16px rgba(0,0,0,.4);max-width:90%}
 .toast.err{background:var(--error-color,#db4437)}
 @media(max-width:600px){.charts{grid-template-columns:1fr}.wrap{padding:12px 8px 56px}}
@@ -302,8 +311,13 @@ class RaptBatchesPanel extends HTMLElement {
       return;
     }
     if (act === "imp-back") {
-      this._imp.step = this._imp.step === 3 ? 2 : 1;
-      this._imp.error = null;
+      const m = this._imp;
+      const remote = m.source && m.source.kind === "remote";
+      if (m.step === "help") m.step = m.helpFrom;
+      else if (m.step === 3) m.step = remote && m.recs ? "r2" : 2;
+      else if (m.step === "r2") m.step = 2;
+      else m.step = 1;
+      m.error = null;
       this._render();
       return;
     }
@@ -314,6 +328,14 @@ class RaptBatchesPanel extends HTMLElement {
       return;
     }
     if (act === "imp-go") return this._impGo();
+    if (act === "imp-help") {
+      this._imp.helpFrom = this._imp.step;
+      this._imp.step = "help";
+      this._render();
+      return;
+    }
+    if (act === "imp-find") return this._impFind();
+    if (act === "imp-rec") return this._impRec(t.dataset.id);
     const id = t.dataset.id || this._detailId;
     switch (act) {
       case "menu":
@@ -629,6 +651,55 @@ class RaptBatchesPanel extends HTMLElement {
     this._render();
   }
 
+  // Pulling from the RAPT website: the cookie lives only in this dialog's memory.
+  _impRemoteInputs() {
+    const m = this._imp;
+    const recording = String(m.recording ?? "").trim();
+    const cookie = String(m.cookie ?? "").trim();
+    if (!recording) {
+      m.error = "Enter the recording number or the chart page address.";
+      return null;
+    }
+    if (!cookie) {
+      m.error = "Paste your RAPT login cookie. Select 'How do I get this?' for help.";
+      return null;
+    }
+    return { recording, cookie };
+  }
+
+  async _impFind() {
+    const m = this._imp;
+    m.error = null;
+    const inp = this._impRemoteInputs();
+    if (!inp) return this._render();
+    m.busy = true;
+    this._render();
+    try {
+      const r = await this._ws({ type: "rapt_batches/remote_list", ...inp });
+      Object.assign(m, { recs: r.recordings, device: r.device, step: "r2" });
+    } catch (e) {
+      m.error = (e && e.message) || "Could not reach the RAPT site.";
+    }
+    m.busy = false;
+    this._render();
+  }
+
+  async _impRec(id) {
+    const m = this._imp;
+    m.busy = true;
+    m.error = null;
+    this._render();
+    try {
+      const inp = { cookie: String(m.cookie).trim(), recording: String(id) };
+      const p = await this._ws({ type: "rapt_batches/remote_preview", ...inp });
+      Object.assign(m, { recId: String(id), preview: p, name: p.title, og: p.og_guess, fg: p.fg_guess, step: 3 });
+    } catch (e) {
+      m.error = (e && e.message) || "Could not read that recording.";
+    }
+    m.busy = false;
+    this._render();
+  }
+
   async _impGo() {
     const m = this._imp;
     const name = String(m.name ?? "").trim();
@@ -645,7 +716,10 @@ class RaptBatchesPanel extends HTMLElement {
     m.error = null;
     this._render();
     try {
-      const r = await this._ws({ type: "rapt_batches/import", source: m.source.id, text: m.text, name, og, fg });
+      const r =
+        m.source.kind === "remote"
+          ? await this._ws({ type: "rapt_batches/remote_import", cookie: String(m.cookie).trim(), recording: m.recId, name, og, fg })
+          : await this._ws({ type: "rapt_batches/import", source: m.source.id, text: m.text, name, og, fg });
       this._imp = null;
       this._toast("Batch imported. It is in the Archived list.");
       await this._refresh();
@@ -665,6 +739,25 @@ class RaptBatchesPanel extends HTMLElement {
       inner = `<h3>Import a batch</h3><p>Where is the data from?</p>` +
         m.sources.map((x) => `<button class="src" data-act="imp-source" data-id="${esc(x.id)}"><b>${esc(x.label)}</b><br><span>${esc(x.description)}</span></button>`).join("") +
         err + `<div class="btns"><button data-act="imp-cancel">Cancel</button></div>`;
+    } else if (m.step === "help") {
+      return `<div class="overlay" data-act="imp-bg"><div class="dialog wide" role="dialog">${this._cookieHelpHtml()}</div></div>`;
+    } else if (m.step === 2 && m.source.kind === "remote") {
+      inner = `<h3>${esc(m.source.label)}</h3><p>${esc(m.source.help)}</p>` +
+        `<label>Recording number or chart page address<input data-imp="recording" placeholder="https://brew.rapt.io/batch/rec/919738/chart" value="${esc(m.recording)}" autocomplete="off"></label>` +
+        `<label>RAPT login cookie<input data-imp="cookie" type="password" autocomplete="off" value="${esc(m.cookie)}"></label>` +
+        `<button class="linkbtn" data-act="imp-help">How do I get this?</button>` +
+        `<p style="font-size:12px">The cookie is sent to Home Assistant and on to brew.rapt.io for this import only. It is not saved.</p>` +
+        (m.busy ? `<p>Contacting RAPT...</p>` : "") + err +
+        `<div class="btns"><button data-act="imp-back">Back</button><button data-act="imp-cancel">Cancel</button>` +
+        `<button class="primary" data-act="imp-find" ${m.busy ? "disabled" : ""}>Find recordings</button></div>`;
+    } else if (m.step === "r2") {
+      const list = m.recs.length
+        ? m.recs.map((r) => `<button class="rec" data-act="imp-rec" data-id="${esc(r.id)}" ${r.active || m.busy ? "disabled" : ""}><b>${esc(r.title)}</b>` +
+            `<span>${r.active ? "still running" : fmtDate(r.start_ts)}</span></button>`).join("")
+        : `<p>No recordings were found on that device.</p>`;
+      inner = `<h3>Choose a recording</h3><p>On ${esc(m.device || "that device")}. Recordings that are still running cannot be imported; finish them on the RAPT site first.</p>` +
+        list + (m.busy ? `<p>Downloading the readings. This can take a little while...</p>` : "") + err +
+        `<div class="btns"><button data-act="imp-back" ${m.busy ? "disabled" : ""}>Back</button><button data-act="imp-cancel">Cancel</button></div>`;
     } else if (m.step === 2) {
       inner = `<h3>${esc(m.source.label)}</h3><p>${esc(m.source.help)}</p>` +
         `<input type="file" id="imp-file" accept="${esc(m.source.accept)}" ${m.busy ? "disabled" : ""}>` +
@@ -684,6 +777,25 @@ class RaptBatchesPanel extends HTMLElement {
         `<button class="primary" data-act="imp-go" ${m.busy ? "disabled" : ""}>${m.busy ? "Importing..." : "Import"}</button></div>`;
     }
     return `<div class="overlay" data-act="imp-bg"><div class="dialog" role="dialog">${inner}</div></div>`;
+  }
+
+  _cookieHelpHtml() {
+    return `<h3>Getting your RAPT login cookie</h3>` +
+      `<p>The new RAPT site has no export button, so this import reads your recording the same way the site's own charts do. To do that it needs to prove it is you, using the cookie your browser holds while you are logged in.</p>` +
+      `<div class="warn"><b>Treat the cookie like a password.</b> Anyone holding it can use your RAPT account until it expires. It is only used for this import, goes only to Home Assistant and brew.rapt.io, and is not saved. It expires after a while, so you may need a fresh one next time.</div>` +
+      `<h3 style="font-size:15px">On a computer (recommended)</h3><ol>` +
+      `<li>Log in to <code>brew.rapt.io</code> and open the recording's chart page. The address looks like <code>https://brew.rapt.io/batch/rec/919738/chart</code>. The number is the recording number.</li>` +
+      `<li>Press <b>F12</b> to open the developer tools and select the <b>Network</b> tab.</li>` +
+      `<li>Reload the page (<b>F5</b>). Select the first request in the list, usually named after the page (<code>chart</code>).</li>` +
+      `<li>Under <b>Headers</b>, scroll to <b>Request Headers</b> and find <b>Cookie</b>. Right-click it and choose <b>Copy value</b> (or select its whole value and copy it).</li>` +
+      `<li>Paste it into the cookie box. It is one long line of <code>name=value; name=value</code> pairs.</li></ol>` +
+      `<h3 style="font-size:15px">On a phone or tablet</h3>` +
+      `<p>This is difficult on mobile: phone browsers generally have no developer tools, and the cookie cannot be read from the page itself or the address bar. Your options:</p><ul>` +
+      `<li><b>Easiest:</b> do the steps above on a computer, send the cookie to yourself (a notes app or a message to yourself), then open this panel on the phone and paste it.</li>` +
+      `<li>Use a computer for the whole import, then view the batch on the phone afterwards.</li>` +
+      `<li>Advanced: some browsers can be inspected from a computer over USB (for example Chrome's remote debugging), which lets you do the same steps against the phone.</li></ul>` +
+      `<p style="font-size:12px">If the import says you are not logged in, the cookie is incomplete or has expired. Copy a fresh one, and make sure you copied the whole value.</p>` +
+      `<div class="btns"><button class="primary" data-act="imp-back">Got it</button></div>`;
   }
 
   // ---- dialogs and toasts ----------------------------------------------

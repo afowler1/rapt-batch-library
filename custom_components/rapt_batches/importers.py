@@ -190,7 +190,7 @@ SOURCES: dict[str, dict[str, Any]] = {
         "kind": "remote",
         "label": "RAPT Brew website (brew.rapt.io)",
         "description": "Pull a finished recording straight from the new RAPT site, which has no export button. Needs your login cookie.",
-        "help": "Enter the recording from the chart page address, and your RAPT login cookie.",
+        "help": "Paste your RAPT login cookie and your recordings will be listed.",
     },
 }
 

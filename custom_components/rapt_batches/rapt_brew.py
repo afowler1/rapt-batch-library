@@ -288,15 +288,31 @@ def to_import_result(tele: dict[str, dict[int, dict[str, Any]]]) -> ImportResult
     return build_result(records, skipped)
 
 
-async def async_list_recordings(hass: HomeAssistant, cookie: str, recording: str) -> dict[str, Any]:
-    """Every recording on the device that owns the given one."""
-    fid = parse_recording_id(recording)
+_PUSH_RE = re.compile(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)')
+
+
+def parse_recordings_page(html: str) -> list[dict[str, Any]]:
+    """The recordings embedded in the /batches page (the site renders them into the HTML)."""
+    text = "".join(json.loads(m.group(1)) for m in _PUSH_RE.finditer(html))
+    marker = '"recordings":['
+    at = text.find(marker)
+    if at < 0:
+        raise HomeAssistantError("Could not find the recording list (the RAPT site may have changed).")
+    try:
+        items, _end = json.JSONDecoder().raw_decode(text[at + len(marker) - 1 :])
+    except ValueError as err:
+        raise HomeAssistantError("Could not read the recording list (the RAPT site may have changed).") from err
+    return [r for r in items if isinstance(r, dict) and "frontendId" in r]
+
+
+async def async_list_recordings(hass: HomeAssistant, cookie: str) -> dict[str, Any]:
+    """Every recording on the account, newest first."""
     cache = hass.data.setdefault("rapt_batches_actions", {})
     async with RaptBrewClient(hass, cookie, cache) as client:
-        meta = await client.page_meta(fid)
-        items = await client.recordings(meta)
+        status, html = await client._http("GET", "/batches?view=all")
+    if status != 200:
+        raise HomeAssistantError(f"The RAPT site answered HTTP {status}.")
     return {
-        "device": meta["device_name"],
         "recordings": [
             {
                 "id": r["frontendId"],
@@ -305,9 +321,8 @@ async def async_list_recordings(hass: HomeAssistant, cookie: str, recording: str
                 "start_ts": _iso_to_ts(r.get("startTime")),
                 "end_ts": _iso_to_ts(r.get("endTime")),
             }
-            for r in sorted(items, key=lambda r: r.get("startTime") or "", reverse=True)
-            if "frontendId" in r
-        ],
+            for r in sorted(parse_recordings_page(html), key=lambda r: r.get("startTime") or "", reverse=True)
+        ]
     }
 
 

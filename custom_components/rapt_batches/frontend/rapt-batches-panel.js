@@ -654,17 +654,12 @@ class RaptBatchesPanel extends HTMLElement {
   // Pulling from the RAPT website: the cookie lives only in this dialog's memory.
   _impRemoteInputs() {
     const m = this._imp;
-    const recording = String(m.recording ?? "").trim();
     const cookie = String(m.cookie ?? "").trim();
-    if (!recording) {
-      m.error = "Enter the recording number or the chart page address.";
-      return null;
-    }
     if (!cookie) {
       m.error = "Paste your RAPT login cookie. Select 'How do I get this?' for help.";
       return null;
     }
-    return { recording, cookie };
+    return { cookie };
   }
 
   async _impFind() {
@@ -676,7 +671,7 @@ class RaptBatchesPanel extends HTMLElement {
     this._render();
     try {
       const r = await this._ws({ type: "rapt_batches/remote_list", ...inp });
-      Object.assign(m, { recs: r.recordings, device: r.device, step: "r2" });
+      Object.assign(m, { recs: r.recordings, step: "r2" });
     } catch (e) {
       m.error = (e && e.message) || "Could not reach the RAPT site.";
     }
@@ -743,19 +738,18 @@ class RaptBatchesPanel extends HTMLElement {
       return `<div class="overlay" data-act="imp-bg"><div class="dialog wide" role="dialog">${this._cookieHelpHtml()}</div></div>`;
     } else if (m.step === 2 && m.source.kind === "remote") {
       inner = `<h3>${esc(m.source.label)}</h3><p>${esc(m.source.help)}</p>` +
-        `<label>Recording number or chart page address<input data-imp="recording" placeholder="https://brew.rapt.io/batch/rec/919738/chart" value="${esc(m.recording)}" autocomplete="off"></label>` +
         `<label>RAPT login cookie<input data-imp="cookie" type="password" autocomplete="off" value="${esc(m.cookie)}"></label>` +
         `<button class="linkbtn" data-act="imp-help">How do I get this?</button>` +
         `<p style="font-size:12px">The cookie is sent to Home Assistant and on to brew.rapt.io for this import only. It is not saved.</p>` +
         (m.busy ? `<p>Contacting RAPT...</p>` : "") + err +
         `<div class="btns"><button data-act="imp-back">Back</button><button data-act="imp-cancel">Cancel</button>` +
-        `<button class="primary" data-act="imp-find" ${m.busy ? "disabled" : ""}>Find recordings</button></div>`;
+        `<button class="primary" data-act="imp-find" ${m.busy ? "disabled" : ""}>List recordings</button></div>`;
     } else if (m.step === "r2") {
       const list = m.recs.length
         ? m.recs.map((r) => `<button class="rec" data-act="imp-rec" data-id="${esc(r.id)}" ${r.active || m.busy ? "disabled" : ""}><b>${esc(r.title)}</b>` +
             `<span>${r.active ? "still running" : fmtDate(r.start_ts)}</span></button>`).join("")
         : `<p>No recordings were found on that device.</p>`;
-      inner = `<h3>Choose a recording</h3><p>On ${esc(m.device || "that device")}. Recordings that are still running cannot be imported; finish them on the RAPT site first.</p>` +
+      inner = `<h3>Choose a recording</h3><p>Everything on your RAPT account, newest first. Recordings that are still running cannot be imported; finish them on the RAPT site first.</p>` +
         list + (m.busy ? `<p>Downloading the readings. This can take a little while...</p>` : "") + err +
         `<div class="btns"><button data-act="imp-back" ${m.busy ? "disabled" : ""}>Back</button><button data-act="imp-cancel">Cancel</button></div>`;
     } else if (m.step === 2) {
@@ -784,7 +778,7 @@ class RaptBatchesPanel extends HTMLElement {
       `<p>The new RAPT site has no export button, so this import reads your recording the same way the site's own charts do. To do that it needs to prove it is you, using the cookie your browser holds while you are logged in.</p>` +
       `<div class="warn"><b>Treat the cookie like a password.</b> Anyone holding it can use your RAPT account until it expires. It is only used for this import, goes only to Home Assistant and brew.rapt.io, and is not saved. It expires after a while, so you may need a fresh one next time.</div>` +
       `<h3 style="font-size:15px">On a computer (recommended)</h3><ol>` +
-      `<li>Log in to <code>brew.rapt.io</code> and open the recording's chart page. The address looks like <code>https://brew.rapt.io/batch/rec/919738/chart</code>. The number is the recording number.</li>` +
+      `<li>Log in to <code>brew.rapt.io</code> and open any of your recordings, for example from the Batches list.</li>` +
       `<li>Press <b>F12</b> to open the developer tools and select the <b>Network</b> tab.</li>` +
       `<li>Reload the page (<b>F5</b>). Select the first request in the list, usually named after the page (<code>chart</code>).</li>` +
       `<li>Under <b>Headers</b>, scroll to <b>Request Headers</b> and find <b>Cookie</b>. Right-click it and choose <b>Copy value</b> (or select its whole value and copy it).</li>` +

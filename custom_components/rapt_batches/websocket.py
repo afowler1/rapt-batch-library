@@ -183,13 +183,12 @@ async def ws_import(hass, connection, msg) -> None:
     {
         vol.Required("type"): "rapt_batches/remote_list",
         vol.Required("cookie"): str,
-        vol.Required("recording"): str,
     }
 )
 @websocket_api.async_response
 async def ws_remote_list(hass, connection, msg) -> None:
     try:
-        result = await rapt_brew.async_list_recordings(hass, msg["cookie"], msg["recording"])
+        result = await rapt_brew.async_list_recordings(hass, msg["cookie"])
     except HomeAssistantError as err:
         connection.send_error(msg["id"], "failed", str(err))
         return

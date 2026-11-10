@@ -82,10 +82,24 @@ class FakeSite:
         self.telemetry_calls = 0
         self.cookies_seen = set()
 
+    def batches_page(self):
+        recs = [
+            {"frontendId": self.fid, "macAddress": "aa-bb", "status": "ACTIVE" if self.active else "ENDED",
+             "title": 'Pale "quoted" ale', "notes": "line1\nline2", "startTime": "2026-10-10T06:00:25.193Z",
+             "endTime": None if self.active else "2026-10-20T06:00:25.000Z", "originalGravity": 1.05, "finalGravity": None},
+            {"frontendId": 7, "macAddress": "cc-dd", "status": "ENDED", "title": "Older",
+             "startTime": "2026-01-01T00:00:00.000Z", "endTime": "2026-01-10T00:00:00.000Z"},
+        ]
+        data = json.dumps({"recordings": recs, "filters": []}, separators=(",", ":"))
+        chunk = json.dumps("5:[\"$\",\"$L18\",null," + data + "]\n")
+        return "<html><script>self.__next_f.push([1,%s])</script></html>" % chunk
+
     def install(self, client):
         client._http = self.http
 
     async def http(self, method, path, body=None, headers=None):
+        if path.startswith("/batches"):
+            return 200, self.batches_page()
         if path.endswith("/chart") and method == "GET":
             end = "null" if self.active else str(START + 10 * 86_400_000)
             page = (
@@ -192,6 +206,34 @@ class Conversion(unittest.TestCase):
     def test_no_gravity_is_an_error(self):
         with self.assertRaises(HAError):
             brew.to_import_result({"entries": {1: {"t": 1, "temperature": 20}}, "control": {}})
+
+
+class HassStub:
+    data = {}
+
+
+class Listing(unittest.TestCase):
+    def list_with(self, active):
+        site = FakeSite([], [], active=active)
+        orig = brew.RaptBrewClient._http
+        brew.RaptBrewClient._http = lambda self, *a, **k: site.http(*a, **k)
+        try:
+            return run(brew.async_list_recordings(HassStub(), "session=abc"))
+        finally:
+            brew.RaptBrewClient._http = orig
+
+    def test_lists_whole_account_newest_first(self):
+        out = self.list_with(False)
+        self.assertEqual([r["id"] for r in out["recordings"]], [42, 7])
+        self.assertEqual(out["recordings"][0]["title"], 'Pale "quoted" ale')
+        self.assertFalse(out["recordings"][0]["active"])
+
+    def test_active_flagged(self):
+        self.assertTrue(self.list_with(True)["recordings"][0]["active"])
+
+    def test_page_without_list(self):
+        with self.assertRaises(HAError):
+            brew.parse_recordings_page("<html>nothing</html>")
 
 
 class Pulling(unittest.TestCase):

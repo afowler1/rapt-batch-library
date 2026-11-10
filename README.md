@@ -31,8 +31,7 @@ Fermentation data is kept in `config/rapt_batches.db`, not the recorder, so it s
 Brewing panel -> **Import**. Two sources:
 - **Legacy RAPT Portal**: upload the CSV you exported from the old portal.
 - **RAPT Brew website (brew.rapt.io)**: the new site has no export button, so the panel pulls a *finished*
-  recording for you. Enter the recording number (or paste the chart page address,
-  `https://brew.rapt.io/batch/rec/<number>/chart`) and your RAPT login cookie, pick the recording, and import.
+  recording for you. Paste your RAPT login cookie, pick a recording from the list of everything on your account, and import.
   The dialog explains how to copy the cookie (easy on a computer, awkward on a phone). The cookie is treated like a
   password: it is used for that import only and never stored. Imports are admin only and land in Archived.
 
